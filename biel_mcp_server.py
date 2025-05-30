@@ -16,7 +16,7 @@ from mcp.types import (
 )
 
 # Configuration from environment variables
-BIEL_API_URL = os.getenv("BIEL_API_URL", "/api/v1/chat/")
+BIEL_API_URL = os.getenv("BIEL_API_URL", "/api/v1/chats/")
 PROJECT_SLUG = os.getenv("BIEL_PROJECT_SLUG", "")
 BASE_URL = os.getenv("BIEL_BASE_URL", "http://localhost:8000")
 API_KEY = os.getenv("BIEL_API_KEY", "")

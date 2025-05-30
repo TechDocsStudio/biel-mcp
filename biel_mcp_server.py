@@ -96,7 +96,7 @@ async def query_biel_ai(arguments: dict) -> list[TextContent]:
             logger.info(f"Querying Biel.ai: {message[:50]}...")
             
             response = await client.post(
-                BASE_URL + BIEL_API_URL,
+                BASE_URL + BIEL_API_URL + PROJECT_SLUG + "/",
                 json=payload,
                 headers=headers
             )

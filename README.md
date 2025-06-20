@@ -1,82 +1,77 @@
-# Biel.ai MCP Server
+<div align="center">
+  <h1>Biel.ai MCP Server</h1>
+  <h3>Connect AI tools like Cursor, VS Code, and Claude Desktop to your product docs</h3>
+</div>
 
-MCP (Model Context Protocol) server to integrate Biel.ai with editors like Cursor.
+Give AI tools access to your company's product knowledge through the [Biel.ai platform](https://biel.ai).
 
-## 🚀 Cursor Setup
+When AI tools can read your product documentation, they become **significantly** more helpful—generating more accurate code completions, answering technical questions with context, and guiding developers with real-time product knowledge.
 
-### 1. Install dependencies
+![Demo](https://docs.biel.ai/assets/images/biel-mcp-a39176ce568e8c3f79fa1b69e90b533d.png)
 
-```bash
-pip install -r requirements.txt
-```
+> **Note:** Requires a Biel.ai account and project setup. **[Start your free 15-day trial](https://app.biel.ai/accounts/signup/)**.
 
-### 2. Configure Cursor
+<h3><a href="https://docs.biel.ai/integrations/mcp-server?utm_source=github&utm_medium=referral&utm_campaign=readme">See quickstart instructions →</a></h3>
 
-1. **Open Cursor settings:**
-   - Press `Ctrl+Shift+J` (Windows/Linux) or `Cmd+Shift+J` (Mac)
-   -  Go to "MCP" and "Add new global MCP Server"
+## Getting started
 
-2. **Add MCP configuration:**
-   Add this configuration:
+### 1. Get your MCP configuration
 
 ```json
 {
   "mcpServers": {
     "biel-ai": {
-      "command": "python",
-      "args": ["/ABSOLUTE/PATH/TO/PARENT/FOLDER/biel-mcp/biel_mcp_server.py"],
-       "env": {
-         "BIEL_API_KEY": "your-api-key",
-         "BIEL_BASE_URL": "http://localhost:8000",
-         "BIEL_PROJECT_SLUG": "your-project-slug"
-       }
+      "description": "Query your product's documentation, APIs, and knowledge base.",
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://mcp.biel.ai/sse?project_slug=YOUR_PROJECT_SLUG&api_key=YOUR_API_KEY&domain=https://your-docs-domain.com"
+      ]
     }
   }
 }
 ```
 
-**⚠️ Important:** Change the paths to the absolute path where you have this project.
+**Required:** `project_slug` and `domain`  
+**Optional:** `api_key` (only needed for private projects)
 
-### 3. Restart Cursor
+### 2. Add to your AI tool
 
-After adding the configuration, restart Cursor completely.
+* **Cursor**: **Settings** → **Tools & Integrations* → **New MCP server**.
+* **Claude Desktop**: Edit `claude_desktop_config.json`  
+* **VS Code**: Install **MCP extension**.
 
-### 4. Verify connection
+### 3. Start asking questions
 
-1. Open Cursor chat (Ctrl+L)
-2. You can ask: "What is Biel.ai?"
-
-## 🔧 Usage
-
-Once configured, you can use Biel.ai directly from Cursor:
-
-### Conversation management
-
-The server **automatically maintains context** between queries:
-
-1. **First query:** Starts a new conversation
-2. **Following queries:** Automatically continue the previous conversation
-3. **New conversation:** Use `new_conversation: true`
-
-### Usage examples
-
-```bash
-# First question (starts conversation)
-@Biel.ai What is Biel?
-
-# Second question (automatically maintains context)
-@Biel.ai How to add Biel in Docusaurus?
-
-# Start new conversation
-@Biel.ai {"message": "How do I use Biel.ai in React?", "new_conversation": true}
-
-# Use a specific chat_uuid
-@Biel.ai {"message": "Continue explaining", "chat_uuid": "abc123..."}
+```
+Can you check in biel_ai what the auth headers are for the /users endpoint?
 ```
 
-Or simply ask in the chat and Cursor will automatically use the tool when relevant.
+## Self-hosting (Optional)
 
-## 📚 More information
+For advanced users who prefer to run their own MCP server instance:
 
-- [MCP Documentation](https://modelcontextprotocol.io/)
-- [Cursor MCP Integration](https://docs.cursor.com/context/model-context-protocol) 
+### Local development
+```bash
+# Clone and run locally
+git clone https://github.com/techdocsStudio/biel-mcp
+cd biel-mcp
+pip install -r requirements.txt
+python biel_mcp_server.py
+```
+
+### Docker deployment
+```bash
+# Docker Compose (recommended)
+docker-compose up -d --build
+
+# Or Docker directly
+docker build -t biel-mcp .
+docker run -d -p 7832:7832 biel-mcp
+```
+
+## Support
+
+- **Issues**: [GitHub Issues](https://github.com/techdocsStudio/biel-mcp/issues)
+- **Contact**: [support@biel.ai](mailto:support@biel.ai)
+- **Custom Demo**: [Book a demo](https://biel.ai/contact)

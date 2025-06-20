@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "biel-ai": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://mcp.biel.ai/sse?project_slug=YOUR_PROJECT_SLUG&api_key=YOUR_API_KEY&domain=https://your-docs-domain.com"
+      ],
+      "description": "Query your product's documentation, APIs, and knowledge base. Ask about API specs, guides, and troubleshooting."
+    }
+  }
+} 

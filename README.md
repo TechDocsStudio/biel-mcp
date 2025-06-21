@@ -1,13 +1,21 @@
 <div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./logo-dark..jpg" />
+    <img alt="Biel.ai" src="./logo.jpg" />
+  </picture>
   <h1>Biel.ai MCP Server</h1>
   <h3>Connect AI tools like Cursor, VS Code, and Claude Desktop to your product docs</h3>
 </div>
 
+
 Give AI tools access to your company's product knowledge through the [Biel.ai platform](https://biel.ai).
+
+Biel.ai provides a hosted Retrieval-Augmented Generation (RAG) layer that makes your documentation searchable and useful to AI tools. This enables smarter completions, accurate technical answers, and context-aware suggestions—directly in your IDE or chat environment.
+
+![Demo](https://docs.biel.ai/assets/images/biel-mcp-a39176ce568e8c3f79fa1b69e90b533d.png)
 
 When AI tools can read your product documentation, they become **significantly** more helpful—generating more accurate code completions, answering technical questions with context, and guiding developers with real-time product knowledge.
 
-![Demo](https://docs.biel.ai/assets/images/biel-mcp-a39176ce568e8c3f79fa1b69e90b533d.png)
 
 > **Note:** Requires a Biel.ai account and project setup. **[Start your free 15-day trial](https://app.biel.ai/accounts/signup/)**.
 
@@ -25,7 +33,7 @@ When AI tools can read your product documentation, they become **significantly**
       "command": "npx",
       "args": [
         "mcp-remote",
-        "https://mcp.biel.ai/sse?project_slug=YOUR_PROJECT_SLUG&api_key=YOUR_API_KEY&domain=https://your-docs-domain.com"
+        "https://mcp.biel.ai/sse?project_slug=YOUR_PROJECT_SLUG&domain=https://your-docs-domain.com"
       ]
     }
   }

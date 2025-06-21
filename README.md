@@ -4,11 +4,11 @@
     <img alt="Biel.ai" src="./logo.jpg" />
   </picture>
   <h1>Biel.ai MCP Server</h1>
-  <h3>Connect AI tools like Cursor, VS Code, and Claude Desktop to your product docs</h3>
+  <h3>Connect your IDE to your product docs</h3>
 </div>
 
 
-Give AI tools access to your company's product knowledge through the [Biel.ai platform](https://biel.ai).
+Give AI tools like Cursor, VS Code, and Claude Desktop access to your company's product knowledge through the [Biel.ai platform](https://biel.ai).
 
 Biel.ai provides a hosted Retrieval-Augmented Generation (RAG) layer that makes your documentation searchable and useful to AI tools. This enables smarter completions, accurate technical answers, and context-aware suggestions—directly in your IDE or chat environment.
 

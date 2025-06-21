@@ -12,7 +12,7 @@ Give AI tools access to your company's product knowledge through the [Biel.ai pl
 
 Biel.ai provides a hosted Retrieval-Augmented Generation (RAG) layer that makes your documentation searchable and useful to AI tools. This enables smarter completions, accurate technical answers, and context-aware suggestions—directly in your IDE or chat environment.
 
-![Demo](https://docs.biel.ai/assets/images/biel-mcp-a39176ce568e8c3f79fa1b69e90b533d.png)
+![Demo](./demo.png)
 
 When AI tools can read your product documentation, they become **significantly** more helpful—generating more accurate code completions, answering technical questions with context, and guiding developers with real-time product knowledge.
 

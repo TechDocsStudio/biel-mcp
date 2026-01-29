@@ -7,11 +7,11 @@ Allows querying your AI from editors like Cursor via MCP over HTTP
 import asyncio
 import json
 import logging
-from typing import Dict, Optional, Any
+from typing import Any, Dict, Optional
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, Request, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sse_starlette import EventSourceResponse
@@ -72,6 +72,11 @@ TOOLS = [
                     "type": "string",
                     "description": "Domain URL to pass to Biel.ai as context (optional)",
                     "default": "app.biel.ai"
+                },
+                "metadata": {
+                    "type": "string",
+                    "description": "Metadata to tag the conversation source (optional)",
+                    "default": ""
                 }
             },
             "required": ["message"]
@@ -147,6 +152,9 @@ async def query_biel_ai(arguments: Dict[str, Any], defaults: Dict[str, str] = No
         
         if not arguments.get("domain") and defaults.get("domain"):
             arguments["domain"] = defaults["domain"]
+        
+        if not arguments.get("metadata") and defaults.get("metadata"):
+            arguments["metadata"] = defaults["metadata"]
     
     # Validate input
     validation_error = validate_biel_request(arguments)
@@ -160,12 +168,14 @@ async def query_biel_ai(arguments: Dict[str, Any], defaults: Dict[str, str] = No
     api_key = arguments.get("api_key", "")
     chat_uuid = arguments.get("chat_uuid", "")
     domain = arguments.get("domain", "")
+    metadata = arguments.get("metadata", "")
     
     # Prepare request
     payload = {
         "message": message,
         "project_slug": project_slug,
-        "url": domain if domain else base_url
+        "url": domain if domain else base_url,
+        "metadata": metadata
     }
     
     if chat_uuid:
@@ -323,9 +333,10 @@ async def health_check():
                 "project_slug": "Your Biel.ai project slug",
                 "api_key": "Your API key (optional)",
                 "base_url": "Biel.ai instance URL (optional, defaults to https://app.biel.ai)",
-                "domain": "Domain URL to pass as context to Biel.ai (optional)"
+                "domain": "Domain URL to pass as context to Biel.ai (optional)",
+                "metadata": "Metadata to tag conversation source (optional)"
             },
-            "example": "/sse?project_slug=your-slug&api_key=your-key&domain=https://example.com"
+            "example": "/sse?project_slug=your-slug&api_key=your-key&domain=https://example.com&metadata=mcp"
         }
     }
 
@@ -337,7 +348,8 @@ async def sse_endpoint(
     project_slug: Optional[str] = Query(None),
     api_key: Optional[str] = Query(None),
     base_url: Optional[str] = Query(None),
-    domain: Optional[str] = Query(None)
+    domain: Optional[str] = Query(None),
+    metadata: Optional[str] = Query(None)
 ):
     """MCP Server-Sent Events endpoint with query parameters for configuration."""
     # Build defaults from query parameters
@@ -350,6 +362,8 @@ async def sse_endpoint(
         defaults["base_url"] = base_url
     if domain:
         defaults["domain"] = domain
+    if metadata:
+        defaults["metadata"] = metadata
     
     return EventSourceResponse(mcp_sse_generator(request, message, defaults))
 
@@ -360,7 +374,8 @@ async def sse_post_endpoint(
     project_slug: Optional[str] = Query(None),
     api_key: Optional[str] = Query(None),
     base_url: Optional[str] = Query(None),
-    domain: Optional[str] = Query(None)
+    domain: Optional[str] = Query(None),
+    metadata: Optional[str] = Query(None)
 ):
     """Handle POST requests to SSE endpoint with query parameters for configuration."""
     # Build defaults from query parameters
@@ -373,6 +388,8 @@ async def sse_post_endpoint(
         defaults["base_url"] = base_url
     if domain:
         defaults["domain"] = domain
+    if metadata:
+        defaults["metadata"] = metadata
     
     try:
         data = await request.json()

@@ -684,7 +684,7 @@ async def streamable_http_endpoint_v2(
                         "id": f"{session_prefix}-{event_counter}",
                         "event": "ping",
                         "data": "",
-                        "retry": str(KEEPALIVE_INTERVAL * 1000)  # retry in milliseconds
+                        "retry": KEEPALIVE_INTERVAL * 1000  # retry in milliseconds
                     }
                     event_counter += 1
             except asyncio.CancelledError:

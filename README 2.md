@@ -7,6 +7,8 @@
   <h3>Connect your IDE to your product docs</h3>
 </div>
 
+[![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/TechDocsStudio/biel-mcp)](https://archestra.ai/mcp-catalog/techdocsstudio__biel-mcp)
+
 
 Give AI tools like Cursor, VS Code, and Claude Desktop access to your company's product knowledge through the [Biel.ai platform](https://biel.ai).
 
@@ -22,7 +24,6 @@ When AI tools can read your product documentation, they become **significantly**
 <h3><a href="https://docs.biel.ai/integrations/mcp-server?utm_source=github&utm_medium=referral&utm_campaign=readme">See quickstart instructions →</a></h3>
 
 ## Getting started
-[![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/TechDocsStudio/biel-mcp)](https://archestra.ai/mcp-catalog/techdocsstudio__biel-mcp)
 
 ### 1. Get your MCP configuration
 

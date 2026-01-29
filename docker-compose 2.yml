@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  biel-mcp-server:
+    build: .
+    ports:
+      - "7832:7832"
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7832/sse"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s 

@@ -97,7 +97,7 @@ class SessionManager:
         now = datetime.now()
         expired = [
             sid for sid, session in self.sessions.items()
-            if (now - session["last_active"]).seconds > SESSION_TIMEOUT
+            if (now - session["last_active"]).total_seconds() > SESSION_TIMEOUT
         ]
         for sid in expired:
             self.delete_session(sid)

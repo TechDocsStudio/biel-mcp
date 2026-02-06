@@ -9,7 +9,7 @@ services:
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7832/sse"]
+      test: ["CMD", "curl", "-f", "http://localhost:7832/health"]
       interval: 30s
       timeout: 10s
       retries: 3

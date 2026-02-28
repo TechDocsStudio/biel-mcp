@@ -181,7 +181,10 @@ async def query_biel_ai(arguments: Dict[str, Any], defaults: Dict[str, str] = No
     if chat_uuid:
         payload["chat_uuid"] = chat_uuid
     
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "X-Biel-Source": "mcp",  # Identifies requests coming from the MCP server
+    }
     if api_key:
         headers["Authorization"] = f"Api-Key {api_key}"
     

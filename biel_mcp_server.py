@@ -118,15 +118,6 @@ TOOLS = [
                     "type": "string",
                     "description": "Your question about code, SDK or documentation"
                 },
-                "base_url": {
-                    "type": "string",
-                    "description": "Base URL of your Biel.ai instance",
-                    "default": DEFAULT_BASE_URL
-                },
-                "project_slug": {
-                    "type": "string",
-                    "description": "Project slug for your Biel.ai project"
-                },
                 "api_key": {
                     "type": "string",
                     "description": "API key for authentication (optional)",

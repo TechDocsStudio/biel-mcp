@@ -169,6 +169,7 @@ async def query_biel_ai(arguments: Dict[str, Any], defaults: Dict[str, str] = No
     chat_uuid = arguments.get("chat_uuid", "")
     domain = arguments.get("domain", "")
     metadata = arguments.get("metadata", "")
+    client_ip = (defaults or {}).get("client_ip", "")
     
     # Prepare request
     payload = {
@@ -187,6 +188,9 @@ async def query_biel_ai(arguments: Dict[str, Any], defaults: Dict[str, str] = No
     }
     if api_key:
         headers["Authorization"] = f"Api-Key {api_key}"
+    # Forward the real client IP so the backend can store it for analytics
+    if client_ip:
+        headers["X-Client-IP"] = client_ip
     
     full_url = f"{base_url.rstrip('/')}{BIEL_API_PATH}/"
     
@@ -355,8 +359,14 @@ async def sse_endpoint(
     metadata: Optional[str] = Query(None)
 ):
     """MCP Server-Sent Events endpoint with query parameters for configuration."""
+    # Capture the real client IP to forward to the Biel.ai backend for analytics
+    client_ip = (
+        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        or request.client.host
+    )
+
     # Build defaults from query parameters
-    defaults = {}
+    defaults = {"client_ip": client_ip}
     if project_slug:
         defaults["project_slug"] = project_slug
     if api_key:
@@ -381,8 +391,14 @@ async def sse_post_endpoint(
     metadata: Optional[str] = Query(None)
 ):
     """Handle POST requests to SSE endpoint with query parameters for configuration."""
+    # Capture the real client IP to forward to the Biel.ai backend for analytics
+    client_ip = (
+        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        or request.client.host
+    )
+
     # Build defaults from query parameters
-    defaults = {}
+    defaults = {"client_ip": client_ip}
     if project_slug:
         defaults["project_slug"] = project_slug
     if api_key:

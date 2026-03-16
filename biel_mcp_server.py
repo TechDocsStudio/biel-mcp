@@ -161,6 +161,21 @@ def create_error_response(message: str) -> Dict[str, str]:
     return {"type": "text", "text": f"Error: {message}"}
 
 
+def get_client_ip(request: Request) -> str:
+    """Extract real client IP considering common proxy headers"""
+    if "cf-connecting-ip" in request.headers:
+        return request.headers["cf-connecting-ip"].strip()
+    
+    if "x-real-ip" in request.headers:
+        return request.headers["x-real-ip"].strip()
+        
+    x_forwarded_for = request.headers.get("x-forwarded-for", "")
+    if x_forwarded_for:
+        return x_forwarded_for.split(",")[0].strip()
+        
+    return request.client.host if request.client else ""
+
+
 def create_success_response(text: str) -> Dict[str, str]:
     """Create a standardized success response."""
     return {"type": "text", "text": text}
@@ -424,10 +439,7 @@ async def sse_endpoint_v1(
     """V1: MCP Server-Sent Events endpoint with query parameters for configuration."""
     logger.info("V1 SSE endpoint accessed")
     # Capture the real client IP to forward to the Biel.ai backend for analytics
-    client_ip = (
-        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-        or request.client.host
-    )
+    client_ip = get_client_ip(request)
 
     # Build defaults from query parameters
     defaults = {"client_ip": client_ip}
@@ -457,10 +469,7 @@ async def sse_post_endpoint_v1(
     """V1: Handle POST requests to SSE endpoint with query parameters for configuration."""
     logger.info("V1 SSE POST endpoint accessed")
     # Capture the real client IP to forward to the Biel.ai backend for analytics
-    client_ip = (
-        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-        or request.client.host
-    )
+    client_ip = get_client_ip(request)
 
     # Build defaults from query parameters
     defaults = {"client_ip": client_ip}
@@ -545,8 +554,12 @@ async def streamable_http_endpoint_v2(
     # Cleanup expired sessions periodically
     session_manager.cleanup_expired_sessions()
     
+    # Capture the real client IP for analytics
+    client_ip = get_client_ip(request)
+    
     # Build defaults from URL path and query parameters
     defaults = {
+        "client_ip": client_ip,
         "project_slug": project_slug,
         "api_key": api_key or "",
         "base_url": base_url or DEFAULT_BASE_URL,
@@ -616,6 +629,7 @@ async def streamable_http_endpoint_v2(
             
             # Use session defaults
             session_defaults = {
+                "client_ip": client_ip,
                 "project_slug": session["project_slug"],
                 "api_key": session["api_key"],
                 "base_url": session["base_url"],

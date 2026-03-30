@@ -55,6 +55,10 @@ When AI tools can read your product documentation, they become **significantly**
 Can you check in biel_ai what the auth headers are for the /users endpoint?
 ```
 
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/techdocsstudio-biel-mcp).
+
 ## Self-hosting (Optional)
 
 For advanced users who prefer to run their own MCP server instance:

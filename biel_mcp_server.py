@@ -618,18 +618,28 @@ async def streamable_http_endpoint_v2(
             
             # Validate session - auto-recreate if expired
             session = session_manager.get_session(mcp_session_id)
+            session_recreated = False
             if not session:
-                # Session expired or invalid - recreate it transparently
-                logger.warning(f"Session {mcp_session_id} expired or not found, recreating for project {project_slug}")
-                new_session_id = session_manager.create_session(
+                if not project_slug:
+                    return JSONResponse(
+                        create_mcp_response(
+                            data.get("id"),
+                            error={"code": -32000, "message": "Invalid session ID"}
+                        ),
+                        status_code=400
+                    )
+                logger.warning(
+                    f"Session {mcp_session_id[:8]}... expired or not found, recreating for project {project_slug}"
+                )
+                mcp_session_id = session_manager.create_session(
                     project_slug=project_slug,
                     api_key=api_key or "",
                     base_url=base_url or DEFAULT_BASE_URL,
                     domain=domain or "",
                     metadata=metadata or ""
                 )
-                mcp_session_id = new_session_id
                 session = session_manager.get_session(mcp_session_id)
+                session_recreated = True
             
             # Use session defaults
             session_defaults = {
@@ -644,7 +654,8 @@ async def streamable_http_endpoint_v2(
             
             # Handle the request
             mcp_response = await handle_mcp_request(data, session_defaults, mcp_session_id)
-            return JSONResponse(mcp_response)
+            response_headers = {"MCP-Session-Id": mcp_session_id} if session_recreated else None
+            return JSONResponse(mcp_response, headers=response_headers)
             
         except json.JSONDecodeError:
             return JSONResponse(

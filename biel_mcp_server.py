@@ -616,16 +616,20 @@ async def streamable_http_endpoint_v2(
                     status_code=400
                 )
             
-            # Validate session
+            # Validate session - auto-recreate if expired
             session = session_manager.get_session(mcp_session_id)
             if not session:
-                return JSONResponse(
-                    create_mcp_response(
-                        data.get("id"),
-                        error={"code": -32000, "message": "Invalid session ID"}
-                    ),
-                    status_code=400
+                # Session expired or invalid - recreate it transparently
+                logger.warning(f"Session {mcp_session_id} expired or not found, recreating for project {project_slug}")
+                new_session_id = session_manager.create_session(
+                    project_slug=project_slug,
+                    api_key=api_key or "",
+                    base_url=base_url or DEFAULT_BASE_URL,
+                    domain=domain or "",
+                    metadata=metadata or ""
                 )
+                mcp_session_id = new_session_id
+                session = session_manager.get_session(mcp_session_id)
             
             # Use session defaults
             session_defaults = {

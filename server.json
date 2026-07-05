@@ -1,0 +1,38 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "ai.biel/biel-ai",
+  "title": "Biel.ai",
+  "description": "Query your product docs from AI tools. Source-cited answers from your indexed documentation, APIs, and knowledge base.",
+  "version": "2.0.0",
+  "websiteUrl": "https://biel.ai",
+  "repository": {
+    "url": "https://github.com/TechDocsStudio/biel-mcp",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.biel.ai/v2/{project_slug}/mcp",
+      "variables": {
+        "project_slug": {
+          "description": "Your project's slug from the Biel.ai dashboard (app.biel.ai)",
+          "isRequired": true
+        }
+      }
+    },
+    {
+      "type": "sse",
+      "url": "https://mcp.biel.ai/sse?project_slug={project_slug}&domain={domain}",
+      "variables": {
+        "project_slug": {
+          "description": "Your project's slug from the Biel.ai dashboard (app.biel.ai)",
+          "isRequired": true
+        },
+        "domain": {
+          "description": "Your documentation site URL, e.g. https://docs.example.com",
+          "isRequired": true
+        }
+      }
+    }
+  ]
+}

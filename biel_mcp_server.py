@@ -162,17 +162,12 @@ def create_error_response(message: str) -> Dict[str, str]:
 
 
 def get_client_ip(request: Request) -> str:
-    """Extract real client IP considering common proxy headers"""
-    if "cf-connecting-ip" in request.headers:
-        return request.headers["cf-connecting-ip"].strip()
-    
-    if "x-real-ip" in request.headers:
-        return request.headers["x-real-ip"].strip()
-        
-    x_forwarded_for = request.headers.get("x-forwarded-for", "")
-    if x_forwarded_for:
-        return x_forwarded_for.split(",")[0].strip()
-        
+    """The connecting peer's IP.
+
+    Forwarding headers are resolved by uvicorn's proxy-headers support, which
+    rewrites ``request.client`` only when the peer is listed in
+    ``FORWARDED_ALLOW_IPS`` — header values from arbitrary peers are ignored.
+    """
     return request.client.host if request.client else ""
 
 
@@ -224,10 +219,7 @@ async def query_biel_ai(arguments: Dict[str, Any], defaults: Dict[str, str] = No
         
         if not arguments.get("api_key") and defaults.get("api_key"):
             arguments["api_key"] = defaults["api_key"]
-        
-        if not arguments.get("base_url") and defaults.get("base_url"):
-            arguments["base_url"] = defaults["base_url"]
-        
+
         if not arguments.get("domain") and defaults.get("domain"):
             arguments["domain"] = defaults["domain"]
         
@@ -242,9 +234,10 @@ async def query_biel_ai(arguments: Dict[str, Any], defaults: Dict[str, str] = No
     if validation_error:
         return create_error_response(validation_error), None
     
-    # Extract arguments
+    # Extract arguments. base_url is connection-level configuration (query
+    # params / session), never a per-call tool argument.
     message = arguments["message"]
-    base_url = arguments.get("base_url", DEFAULT_BASE_URL)
+    base_url = (defaults or {}).get("base_url") or DEFAULT_BASE_URL
     project_slug = arguments["project_slug"]
     api_key = arguments.get("api_key", "")
     chat_uuid = arguments.get("chat_uuid", "")
@@ -839,4 +832,7 @@ if __name__ == "__main__":
     logger.info(f"🌐 V1 (SSE): http://localhost:{DEFAULT_PORT}/sse")
     logger.info(f"🌐 V2 (Streamable HTTP): http://localhost:{DEFAULT_PORT}/v2/{{project_slug}}/mcp")
     
-    uvicorn.run(app, host="0.0.0.0", port=DEFAULT_PORT)
+    # X-Forwarded-* headers are honored only from peers listed in the
+    # FORWARDED_ALLOW_IPS env var (uvicorn default: 127.0.0.1); set it to the
+    # reverse proxy's address in deployment.
+    uvicorn.run(app, host="0.0.0.0", port=DEFAULT_PORT, proxy_headers=True)

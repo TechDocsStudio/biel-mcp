@@ -7,6 +7,9 @@ services:
       - "7832:7832"
     environment:
       - PYTHONUNBUFFERED=1
+      # Peers allowed to set X-Forwarded-* headers; set to the reverse
+      # proxy's address in deployment.
+      - FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-127.0.0.1}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7832/health"]

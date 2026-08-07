@@ -62,10 +62,23 @@ For advanced users who prefer to run their own MCP server instance:
 ### Local development
 ```bash
 # Clone and run locally
-git clone https://github.com/techdocsStudio/biel-mcp
+git clone https://github.com/TechDocsStudio/biel-mcp
 cd biel-mcp
-pip install -r requirements.txt
-python biel_mcp_server.py
+pip install .
+biel-mcp
+```
+
+### Use as a Python package
+
+Applications that host their own ASGI stack can install the server directly
+from a tagged revision and import its FastAPI application:
+
+```bash
+pip install "biel-mcp @ git+https://github.com/TechDocsStudio/biel-mcp.git@VERSION"
+```
+
+```python
+from biel_mcp.server import app
 ```
 
 ### Docker deployment

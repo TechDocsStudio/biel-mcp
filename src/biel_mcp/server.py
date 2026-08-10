@@ -40,6 +40,11 @@ UNKNOWN_METHOD_ERROR = -1
 # may not carry separators or anything else that could reshape that path.
 PROJECT_SLUG_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
+# Client identity is self-reported and ends up in request headers, so it is
+# capped: a header value has no length limit of its own, and an unbounded one
+# would travel on every relayed message.
+CLIENT_IDENTITY_MAX_LENGTH = 128
+
 # Logging is configured by whoever hosts this app: the standalone entrypoint
 # below calls basicConfig, and when mounted inside another ASGI process that
 # host's configuration applies. Configuring it at import time would fight the
@@ -122,7 +127,8 @@ class SessionManager:
 
     async def create_session(self, project_slug: str, api_key: str = "",
                              base_url: str = DEFAULT_BASE_URL,
-                             domain: str = "", metadata: str = "") -> str:
+                             domain: str = "", metadata: str = "",
+                             client_name: str = "", client_version: str = "") -> str:
         """Create a new session and return session ID."""
         session_id = str(uuid.uuid4())
         await self._store.set(session_id, {
@@ -133,11 +139,39 @@ class SessionManager:
             "domain": domain,
             "metadata": metadata,
             "chat_uuid": "",  # Store conversation ID
+            # Which MCP client is connected, as reported at initialize. A
+            # session recreated after expiry never sees that handshake, so
+            # these stay empty and the User-Agent is all the identity left.
+            "client_name": client_name,
+            "client_version": client_version,
             "created_at": datetime.now(),
             "last_active": datetime.now()
         })
         logger.info(f"Created session {session_id} for project {project_slug}")
         return session_id
+
+    async def record_client_info(self, session_id: str, client_name: str,
+                                 client_version: str) -> None:
+        """Attach client identity to a session that already exists.
+
+        A client re-initializing over a live session announces itself again,
+        and that handshake is the only place the identity appears. Unlike a
+        tool call this writes the whole record back, which is only safe
+        because initialize carries no conversation of its own: the record goes
+        back with the ``chat_uuid`` it was read with, so whichever key the
+        store keeps that id under still holds the claim in force.
+        """
+        if not client_name:
+            return
+        session = await self._store.get(session_id)
+        if session is None:
+            return
+        if (session.get("client_name") == client_name
+                and session.get("client_version") == client_version):
+            return
+        session["client_name"] = client_name
+        session["client_version"] = client_version
+        await self._store.set(session_id, session)
 
     async def record_chat_uuid(self, session_id: str, chat_uuid: str) -> str:
         """Bind the session to the conversation it threads, and return the one
@@ -282,6 +316,42 @@ def get_client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
+def header_safe(value: Any) -> str:
+    """Reduce a self-reported value to something that can be a header.
+
+    Everything here reaches us from the client — the ``clientInfo`` it sends at
+    initialize, the User-Agent it sets — and leaves again as a header on the
+    relayed API call. A newline in one of those would let the client append
+    headers of its own, and httpx refuses non-latin-1 bytes outright, which
+    would surface as a failed query rather than a missing label.
+    """
+    if not isinstance(value, str):
+        return ""
+    collapsed = " ".join(value.split())
+    encodable = collapsed.encode("latin-1", "ignore").decode("latin-1")
+    return encodable[:CLIENT_IDENTITY_MAX_LENGTH]
+
+
+def get_user_agent(request: Request) -> str:
+    """The client's User-Agent — identity for transports with no handshake."""
+    return header_safe(request.headers.get("user-agent", ""))
+
+
+def extract_client_info(data: Dict[str, Any]) -> tuple[str, str]:
+    """Read the (name, version) an MCP client reports in its initialize call.
+
+    Every MCP client sends ``clientInfo`` as part of the handshake, which is
+    what tells Claude Code apart from Copilot, Codex or Cursor downstream.
+    """
+    if not isinstance(data, dict):
+        return "", ""
+    params = data.get("params")
+    client_info = params.get("clientInfo") if isinstance(params, dict) else None
+    if not isinstance(client_info, dict):
+        return "", ""
+    return header_safe(client_info.get("name")), header_safe(client_info.get("version"))
+
+
 def create_success_response(text: str) -> Dict[str, str]:
     """Create a standardized success response."""
     return {"type": "text", "text": text}
@@ -359,6 +429,9 @@ async def query_biel_ai(arguments: Dict[str, Any], defaults: Dict[str, str] = No
     domain = arguments.get("domain", "")
     metadata = arguments.get("metadata", "")
     client_ip = (defaults or {}).get("client_ip", "")
+    client_name = (defaults or {}).get("client_name", "")
+    client_version = (defaults or {}).get("client_version", "")
+    user_agent = (defaults or {}).get("user_agent", "")
 
     # Prepare request
     payload = {
@@ -379,6 +452,16 @@ async def query_biel_ai(arguments: Dict[str, Any], defaults: Dict[str, str] = No
     # Forward the real client IP so the backend can store it for analytics
     if client_ip:
         headers["X-Client-IP"] = client_ip
+    # Forward which MCP client asked, so a query can be attributed to Claude
+    # Code, Copilot, Codex, Cursor and the rest. The handshake identity is the
+    # reliable one; the User-Agent goes too because transports without a
+    # session (v1 SSE) and sessions recreated after expiry have nothing else.
+    if client_name:
+        headers["X-MCP-Client-Name"] = client_name
+    if client_version:
+        headers["X-MCP-Client-Version"] = client_version
+    if user_agent:
+        headers["X-MCP-Client-UA"] = user_agent
 
     full_url = f"{base_url.rstrip('/')}{BIEL_API_PATH_TEMPLATE.format(project_slug=project_slug)}"
 
@@ -437,6 +520,13 @@ async def handle_mcp_request(data: Dict[str, Any], defaults: Dict[str, str] = No
             # The session_id will be returned in the Mcp-Session-Id header
             # Use V1 version for SSE (no session_id) and V2 for Streamable HTTP
             protocol_version = MCP_PROTOCOL_VERSION_V2 if session_id else MCP_PROTOCOL_VERSION
+
+            client_name, client_version = extract_client_info(data)
+            if client_name:
+                logger.info(
+                    f"MCP client identified: {client_name} v{client_version} "
+                    f"(session: {session_id})"
+                )
 
             result = {
                 "protocolVersion": protocol_version,
@@ -545,8 +635,11 @@ async def sse_endpoint_v1(
 ):
     """V1: MCP Server-Sent Events endpoint with query parameters for configuration."""
     logger.info("V1 SSE endpoint accessed")
-    # Capture the real client IP to forward to the Biel.ai backend for analytics
+    # Capture the real client IP and User-Agent to forward to the Biel.ai
+    # backend for analytics. This transport keeps no session, so the
+    # handshake's clientInfo cannot outlive the request that carried it.
     client_ip = get_client_ip(request)
+    user_agent = get_user_agent(request)
 
     resolved_base_url = resolve_base_url(
         base_url, request.app.state.allowed_base_urls, request.app.state.api_base_url
@@ -559,7 +652,11 @@ async def sse_endpoint_v1(
         )
 
     # Build defaults from query parameters
-    defaults = {"client_ip": client_ip, "base_url": resolved_base_url}
+    defaults = {
+        "client_ip": client_ip,
+        "user_agent": user_agent,
+        "base_url": resolved_base_url,
+    }
     if project_slug:
         defaults["project_slug"] = project_slug
     if api_key:
@@ -583,8 +680,11 @@ async def sse_post_endpoint_v1(
 ):
     """V1: Handle POST requests to SSE endpoint with query parameters for configuration."""
     logger.info("V1 SSE POST endpoint accessed")
-    # Capture the real client IP to forward to the Biel.ai backend for analytics
+    # Capture the real client IP and User-Agent to forward to the Biel.ai
+    # backend for analytics. This transport keeps no session, so the
+    # handshake's clientInfo cannot outlive the request that carried it.
     client_ip = get_client_ip(request)
+    user_agent = get_user_agent(request)
 
     resolved_base_url = resolve_base_url(
         base_url, request.app.state.allowed_base_urls, request.app.state.api_base_url
@@ -597,7 +697,11 @@ async def sse_post_endpoint_v1(
         )
 
     # Build defaults from query parameters
-    defaults = {"client_ip": client_ip, "base_url": resolved_base_url}
+    defaults = {
+        "client_ip": client_ip,
+        "user_agent": user_agent,
+        "base_url": resolved_base_url,
+    }
     if project_slug:
         defaults["project_slug"] = project_slug
     if api_key:
@@ -686,8 +790,9 @@ async def streamable_http_endpoint_v2(
     # Cleanup expired sessions periodically
     await sessions.cleanup_expired_sessions()
 
-    # Capture the real client IP for analytics
+    # Capture the real client IP and User-Agent for analytics
     client_ip = get_client_ip(request)
+    user_agent = get_user_agent(request)
 
     resolved_base_url = resolve_base_url(
         base_url, request.app.state.allowed_base_urls, request.app.state.api_base_url
@@ -702,6 +807,7 @@ async def streamable_http_endpoint_v2(
     # Build defaults from URL path and query parameters
     defaults = {
         "client_ip": client_ip,
+        "user_agent": user_agent,
         "project_slug": project_slug,
         "api_key": api_key or "",
         "base_url": resolved_base_url,
@@ -717,6 +823,10 @@ async def streamable_http_endpoint_v2(
 
             # Handle initialization specially
             if method == "initialize":
+                # The handshake is the one message carrying the client's name,
+                # so the session takes it now or never learns it.
+                client_name, client_version = extract_client_info(data)
+
                 # Get or create session
                 if mcp_session_id:
                     session = await sessions.get_session(mcp_session_id)
@@ -728,6 +838,9 @@ async def streamable_http_endpoint_v2(
                             ),
                             status_code=400
                         )
+                    await sessions.record_client_info(
+                        mcp_session_id, client_name, client_version
+                    )
                 else:
                     # Create new session
                     session_id = await sessions.create_session(
@@ -735,7 +848,9 @@ async def streamable_http_endpoint_v2(
                         api_key=api_key or "",
                         base_url=resolved_base_url,
                         domain=domain or "",
-                        metadata=metadata or ""
+                        metadata=metadata or "",
+                        client_name=client_name,
+                        client_version=client_version
                     )
                     mcp_session_id = session_id
 
@@ -802,12 +917,17 @@ async def streamable_http_endpoint_v2(
             # Use session defaults
             session_defaults = {
                 "client_ip": client_ip,
+                "user_agent": user_agent,
                 "project_slug": session["project_slug"],
                 "api_key": session["api_key"],
                 "base_url": session["base_url"],
                 "domain": session["domain"],
                 "metadata": session["metadata"],
-                "chat_uuid": session.get("chat_uuid", "")  # Pass current chat_uuid to maintain context
+                "chat_uuid": session.get("chat_uuid", ""),  # Pass current chat_uuid to maintain context
+                # Recorded at initialize; absent on a session recreated after
+                # expiry, where the User-Agent carries what identity is left.
+                "client_name": session.get("client_name", ""),
+                "client_version": session.get("client_version", "")
             }
 
             # Handle the request

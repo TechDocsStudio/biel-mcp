@@ -44,6 +44,7 @@ class RecordingAsyncClient:
             status_code=200,
             json=lambda: {
                 "chat_uuid": "chat-1",
+                "restore_token": "restore-1",
                 "ai_message": {"message": "an answer", "sources": []},
             },
         )
@@ -110,7 +111,11 @@ class ApplicationTest(IsolatedAsyncioTestCase):
         transport = httpx.ASGITransport(app=app)
         with patch(
             "biel_mcp.server.query_biel_ai",
-            return_value=({"type": "text", "text": "answer"}, "chat-1"),
+            return_value=(
+                {"type": "text", "text": "answer"},
+                "chat-1",
+                "restore-1",
+            ),
         ):
             async with httpx.AsyncClient(
                 transport=transport, base_url="http://test"
@@ -137,6 +142,7 @@ class ApplicationTest(IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         session = await sessions.get_session(session_id)
         self.assertEqual(session["chat_uuid"], "chat-1")
+        self.assertEqual(session["restore_token"], "restore-1")
 
 
 class HeaderSafeTest(TestCase):
@@ -225,12 +231,15 @@ class SessionClientIdentityTest(IsolatedAsyncioTestCase):
         """A whole-record write at initialize must not drop the ``chat_uuid``
         a tool call already claimed."""
         session_id = await self.manager.create_session(project_slug="abc123")
-        await self.manager.record_chat_uuid(session_id, "chat-1")
+        await self.manager.record_chat_credentials(
+            session_id, "chat-1", "restore-1"
+        )
 
         await self.manager.record_client_info(session_id, "copilot", "1.4")
 
         session = await self.manager.get_session(session_id)
         self.assertEqual(session["chat_uuid"], "chat-1")
+        self.assertEqual(session["restore_token"], "restore-1")
 
     async def test_an_anonymous_handshake_does_not_erase_a_known_client(self):
         session_id = await self.manager.create_session(
@@ -301,6 +310,38 @@ class RelayedHeadersTest(IsolatedAsyncioTestCase):
         headers = await self.relay({"client_name": "claude-code"})
 
         self.assertEqual(headers["X-Biel-Source"], "mcp")
+
+    async def test_session_restore_capability_authorizes_the_matching_chat(self):
+        headers = await self.relay(
+            {"chat_uuid": "chat-1", "restore_token": "restore-1"}
+        )
+
+        self.assertEqual(headers["X-Chat-Restore-Token"], "restore-1")
+        self.assertEqual(RecordingAsyncClient.calls[-1]["json"]["chat_uuid"], "chat-1")
+
+    async def test_legacy_uuid_only_session_starts_fresh_without_a_403(self):
+        headers = await self.relay({"chat_uuid": "legacy-chat"})
+
+        self.assertNotIn("X-Chat-Restore-Token", headers)
+        self.assertNotIn("chat_uuid", RecordingAsyncClient.calls[-1]["json"])
+
+    async def test_capability_is_not_relayed_for_a_caller_supplied_chat(self):
+        await query_biel_ai(
+            {
+                "message": "hi",
+                "project_slug": "abc123",
+                "chat_uuid": "other-chat",
+            },
+            {
+                "base_url": "https://app.biel.ai",
+                "chat_uuid": "chat-1",
+                "restore_token": "restore-1",
+            },
+        )
+
+        self.assertNotIn(
+            "X-Chat-Restore-Token", RecordingAsyncClient.calls[-1]["headers"]
+        )
 
 
 class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
@@ -385,3 +426,21 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         headers = RecordingAsyncClient.calls[-1]["headers"]
         self.assertNotIn("X-MCP-Client-Name", headers)
+
+    async def test_existing_client_continues_without_supplying_a_restore_token(self):
+        """The capability stays internal; old MCP configs need no changes."""
+        transport = httpx.ASGITransport(app=app)
+        async with RealAsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            initialized = await self.post_mcp(client, self.initialize_body())
+            session_id = initialized.headers["MCP-Session-Id"]
+
+            await self.post_mcp(client, self.call_body(), session_id=session_id)
+            await self.post_mcp(client, self.call_body(), session_id=session_id)
+
+        second_relay = RecordingAsyncClient.calls[-1]
+        self.assertEqual(second_relay["json"]["chat_uuid"], "chat-1")
+        self.assertEqual(
+            second_relay["headers"]["X-Chat-Restore-Token"], "restore-1"
+        )

@@ -55,11 +55,11 @@ logger = logging.getLogger("biel-mcp")
 class SessionStore(Protocol):
     """The storage a ``SessionManager`` needs, and nothing more.
 
-    A session carries the ``chat_uuid`` that threads a client's follow-up
-    questions into one conversation, so every request for a session must see
-    the same record. Keeping the seam this narrow is what lets that record sit
-    in process memory when the server runs alone, and in a shared store when
-    its host runs several instances behind a load balancer.
+    A session carries the ``chat_uuid`` and its matching restore capability so
+    every follow-up can both identify and authorize the conversation. Keeping
+    the seam this narrow is what lets that record sit in process memory when
+    the server runs alone, and in a shared store when its host runs several
+    instances behind a load balancer.
     """
 
     async def get(self, session_id: str) -> Optional[Dict[str, Any]]: ...
@@ -70,7 +70,9 @@ class SessionStore(Protocol):
 
     async def touch(self, session_id: str) -> None: ...
 
-    async def claim_chat_uuid(self, session_id: str, chat_uuid: str) -> str: ...
+    async def claim_chat_credentials(
+        self, session_id: str, chat_uuid: str, restore_token: str
+    ) -> tuple[str, str]: ...
 
     async def purge_expired(self) -> None: ...
 
@@ -96,15 +98,18 @@ class InMemorySessionStore:
         if session is not None:
             session["last_active"] = datetime.now()
 
-    async def claim_chat_uuid(self, session_id: str, chat_uuid: str) -> str:
+    async def claim_chat_credentials(
+        self, session_id: str, chat_uuid: str, restore_token: str
+    ) -> tuple[str, str]:
         session = self.sessions.get(session_id)
         if session is None:
-            return ""
+            return "", ""
         # Nothing is awaited between the read and the write, so the event loop
         # cannot interleave a competing claim.
         if not session["chat_uuid"]:
             session["chat_uuid"] = chat_uuid
-        return session["chat_uuid"]
+            session["restore_token"] = restore_token
+        return session["chat_uuid"], session["restore_token"]
 
     async def purge_expired(self) -> None:
         """Drop sessions idle past the timeout. Stores with a native expiry
@@ -139,6 +144,7 @@ class SessionManager:
             "domain": domain,
             "metadata": metadata,
             "chat_uuid": "",  # Store conversation ID
+            "restore_token": "",  # Capability authorizing that conversation
             # Which MCP client is connected, as reported at initialize. A
             # session recreated after expiry never sees that handshake, so
             # these stay empty and the User-Agent is all the identity left.
@@ -173,17 +179,19 @@ class SessionManager:
         session["client_version"] = client_version
         await self._store.set(session_id, session)
 
-    async def record_chat_uuid(self, session_id: str, chat_uuid: str) -> str:
-        """Bind the session to the conversation it threads, and return the one
-        in force.
+    async def record_chat_credentials(
+        self, session_id: str, chat_uuid: str, restore_token: str
+    ) -> tuple[str, str]:
+        """Bind the session to a conversation and its restore capability.
 
         A session threads exactly one conversation, so the first request to be
-        handed a conversation id decides it and later ones adopt that answer.
-        Written as a claim rather than a read-modify-write because two
-        overlapping tool calls would otherwise each write back the whole
-        record, and the last writer would discard the other's conversation.
+        handed a credential pair decides it and later ones adopt that answer.
+        The values are claimed together because mixing one request's UUID with
+        another request's token would make every continuation fail closed.
         """
-        return await self._store.claim_chat_uuid(session_id, chat_uuid)
+        return await self._store.claim_chat_credentials(
+            session_id, chat_uuid, restore_token
+        )
 
     async def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get session data by ID, refreshing its idle window.
@@ -392,10 +400,12 @@ def format_biel_response(data: Dict[str, Any]) -> str:
     return "\n".join(response_parts)
 
 
-async def query_biel_ai(arguments: Dict[str, Any], defaults: Dict[str, str] = None) -> tuple[Dict[str, str], Optional[str]]:
+async def query_biel_ai(
+    arguments: Dict[str, Any], defaults: Dict[str, str] = None
+) -> tuple[Dict[str, str], Optional[str], Optional[str]]:
     """
     Query Biel.ai API with the provided arguments.
-    Returns a tuple of (response_dict, new_chat_uuid).
+    Returns ``(response_dict, new_chat_uuid, new_restore_token)``.
     """
     # Apply defaults from connection if not provided in arguments
     if defaults:
@@ -411,13 +421,21 @@ async def query_biel_ai(arguments: Dict[str, Any], defaults: Dict[str, str] = No
         if not arguments.get("metadata") and defaults.get("metadata"):
             arguments["metadata"] = defaults["metadata"]
 
-        if not arguments.get("chat_uuid") and defaults.get("chat_uuid"):
+        # A UUID without its bearer capability can no longer authorize a
+        # continuation. Legacy sessions created before capability persistence
+        # therefore start a fresh conversation instead of generating a noisy
+        # 403 on every follow-up.
+        if (
+            not arguments.get("chat_uuid")
+            and defaults.get("chat_uuid")
+            and defaults.get("restore_token")
+        ):
             arguments["chat_uuid"] = defaults["chat_uuid"]
 
     # Validate input
     validation_error = validate_biel_request(arguments)
     if validation_error:
-        return create_error_response(validation_error), None
+        return create_error_response(validation_error), None, None
 
     # Extract arguments. The API origin comes only from the host-vetted
     # defaults — a caller-supplied one would point this request anywhere.
@@ -432,6 +450,7 @@ async def query_biel_ai(arguments: Dict[str, Any], defaults: Dict[str, str] = No
     client_name = (defaults or {}).get("client_name", "")
     client_version = (defaults or {}).get("client_version", "")
     user_agent = (defaults or {}).get("user_agent", "")
+    restore_token = (defaults or {}).get("restore_token", "")
 
     # Prepare request
     payload = {
@@ -449,6 +468,14 @@ async def query_biel_ai(arguments: Dict[str, Any], defaults: Dict[str, str] = No
     }
     if api_key:
         headers["Authorization"] = f"Api-Key {api_key}"
+    # Restore capabilities are session state, never a caller-controlled tool
+    # argument. Send one only for the exact UUID it was issued alongside.
+    if (
+        restore_token
+        and chat_uuid
+        and chat_uuid == (defaults or {}).get("chat_uuid")
+    ):
+        headers["X-Chat-Restore-Token"] = restore_token
     # Forward the real client IP so the backend can store it for analytics
     if client_ip:
         headers["X-Client-IP"] = client_ip
@@ -474,19 +501,31 @@ async def query_biel_ai(arguments: Dict[str, Any], defaults: Dict[str, str] = No
             if response.status_code in (200, 201):
                 data = response.json()
                 formatted_response = format_biel_response(data)
-                # Return response and the chat_uuid from the server to update session
-                return create_success_response(formatted_response), data.get("chat_uuid")
+                # Persist the pair together: the token is bound to this chat.
+                return (
+                    create_success_response(formatted_response),
+                    data.get("chat_uuid"),
+                    data.get("restore_token"),
+                )
             else:
                 error_msg = f"HTTP {response.status_code}: {response.text}"
                 logger.error(f"Biel.ai API error: {error_msg}")
-                return create_error_response(f"Biel.ai API error: {error_msg}"), None
+                return (
+                    create_error_response(f"Biel.ai API error: {error_msg}"),
+                    None,
+                    None,
+                )
 
     except httpx.TimeoutException:
         logger.error("Timeout querying Biel.ai")
-        return create_error_response("⏱️ Timeout: Biel.ai took too long to respond"), None
+        return (
+            create_error_response("⏱️ Timeout: Biel.ai took too long to respond"),
+            None,
+            None,
+        )
     except Exception as e:
         logger.error(f"Unexpected error querying Biel.ai: {e}")
-        return create_error_response(f"Unexpected error: {str(e)}"), None
+        return create_error_response(f"Unexpected error: {str(e)}"), None, None
 
 
 def create_mcp_response(msg_id: Optional[str], result: Optional[Dict] = None,
@@ -547,11 +586,20 @@ async def handle_mcp_request(data: Dict[str, Any], defaults: Dict[str, str] = No
             arguments = params.get("arguments", {})
 
             if tool_name == "biel_ai":
-                result, new_chat_uuid = await query_biel_ai(arguments, defaults)
+                result, new_chat_uuid, new_restore_token = await query_biel_ai(
+                    arguments, defaults
+                )
 
                 # Only V2 requests carry a session to bind the conversation to.
-                if session_id and new_chat_uuid and sessions:
-                    in_force = await sessions.record_chat_uuid(session_id, new_chat_uuid)
+                if (
+                    session_id
+                    and new_chat_uuid
+                    and new_restore_token
+                    and sessions
+                ):
+                    in_force, _ = await sessions.record_chat_credentials(
+                        session_id, new_chat_uuid, new_restore_token
+                    )
                     logger.info(f"Session {session_id} threads chat_uuid: {in_force}")
 
                 return create_mcp_response(msg_id, {"content": [result]})
@@ -924,6 +972,7 @@ async def streamable_http_endpoint_v2(
                 "domain": session["domain"],
                 "metadata": session["metadata"],
                 "chat_uuid": session.get("chat_uuid", ""),  # Pass current chat_uuid to maintain context
+                "restore_token": session.get("restore_token", ""),
                 # Recorded at initialize; absent on a session recreated after
                 # expiry, where the User-Agent carries what identity is left.
                 "client_name": session.get("client_name", ""),

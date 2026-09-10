@@ -492,8 +492,6 @@ async def query_biel_ai(
 
     full_url = f"{base_url.rstrip('/')}{BIEL_API_PATH_TEMPLATE.format(project_slug=project_slug)}"
 
-    logger.info(f"Querying Biel.ai: {message[:50]}... (project: {project_slug})")
-
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             response = await client.post(full_url, json=payload, headers=headers)
@@ -509,7 +507,22 @@ async def query_biel_ai(
                 )
             else:
                 error_msg = f"HTTP {response.status_code}: {response.text}"
-                logger.error(f"Biel.ai API error: {error_msg}")
+                is_client_error = 400 <= response.status_code < 500
+                log = logger.warning if is_client_error else logger.error
+                log(
+                    "Biel.ai API request rejected"
+                    if is_client_error
+                    else "Biel.ai API request failed",
+                    extra={
+                        "event": (
+                            "mcp.biel_request_rejected"
+                            if is_client_error
+                            else "mcp.biel_request_failed"
+                        ),
+                        "provider": "biel",
+                        "status_code": response.status_code,
+                    },
+                )
                 return (
                     create_error_response(f"Biel.ai API error: {error_msg}"),
                     None,

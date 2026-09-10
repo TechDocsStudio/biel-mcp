@@ -50,6 +50,28 @@ class RecordingAsyncClient:
         )
 
 
+class RejectedAsyncClient:
+    """Returns the configured Biel API rejection without making a request."""
+
+    status_code = 403
+    response_text = '{"error":"Your trial has expired"}'
+
+    def __init__(self, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def post(self, url, json=None, headers=None):
+        return SimpleNamespace(
+            status_code=type(self).status_code,
+            text=type(self).response_text,
+        )
+
+
 class ConfigurationTest(TestCase):
     def test_normalize_base_url_strips_whitespace_and_trailing_slash(self):
         self.assertEqual(normalize_base_url(" https://app.biel.ai/ "), "https://app.biel.ai")
@@ -342,6 +364,51 @@ class RelayedHeadersTest(IsolatedAsyncioTestCase):
         self.assertNotIn(
             "X-Chat-Restore-Token", RecordingAsyncClient.calls[-1]["headers"]
         )
+
+
+class BielAPIErrorLoggingTest(IsolatedAsyncioTestCase):
+    async def query(self):
+        with patch("biel_mcp.server.httpx.AsyncClient", RejectedAsyncClient):
+            return await query_biel_ai(
+                {
+                    "message": "private customer question",
+                    "project_slug": "private-project",
+                },
+                {"base_url": "https://app.biel.ai"},
+            )
+
+    async def test_client_rejection_is_a_sanitized_warning(self):
+        RejectedAsyncClient.status_code = 403
+        RejectedAsyncClient.response_text = '{"error":"Your trial has expired"}'
+
+        with self.assertLogs("biel-mcp", level="WARNING") as captured:
+            response, chat_uuid, restore_token = await self.query()
+
+        record = captured.records[-1]
+        self.assertEqual(record.levelname, "WARNING")
+        self.assertEqual(record.getMessage(), "Biel.ai API request rejected")
+        self.assertEqual(record.event, "mcp.biel_request_rejected")
+        self.assertEqual(record.status_code, 403)
+        self.assertNotIn("private customer question", captured.output[-1])
+        self.assertNotIn("private-project", captured.output[-1])
+        self.assertNotIn("Your trial has expired", captured.output[-1])
+        self.assertIn("Your trial has expired", response["text"])
+        self.assertIsNone(chat_uuid)
+        self.assertIsNone(restore_token)
+
+    async def test_server_failure_remains_an_error(self):
+        RejectedAsyncClient.status_code = 503
+        RejectedAsyncClient.response_text = "Service unavailable"
+
+        with self.assertLogs("biel-mcp", level="ERROR") as captured:
+            await self.query()
+
+        record = captured.records[-1]
+        self.assertEqual(record.levelname, "ERROR")
+        self.assertEqual(record.getMessage(), "Biel.ai API request failed")
+        self.assertEqual(record.event, "mcp.biel_request_failed")
+        self.assertEqual(record.status_code, 503)
+        self.assertNotIn("Service unavailable", captured.output[-1])
 
 
 class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):

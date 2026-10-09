@@ -67,7 +67,7 @@ class ConfigurationTest(TestCase):
     def test_tool_advertises_answer_and_search_modes(self):
         properties = TOOLS[0]["inputSchema"]["properties"]
         self.assertEqual(properties["mode"]["enum"], ["answer", "search"])
-        self.assertEqual(properties["mode"]["default"], "answer")
+        self.assertEqual(properties["mode"]["default"], "search")
 
     def test_search_format_bounds_results_and_reports_empty_matches(self):
         data = {"results": [
@@ -342,7 +342,7 @@ class RelayedHeadersTest(IsolatedAsyncioTestCase):
 
     async def relay(self, defaults):
         await query_biel_ai(
-            {"message": "hi", "project_slug": "abc123"},
+            {"message": "hi", "project_slug": "abc123", "mode": "answer"},
             {"base_url": "https://app.biel.ai", **defaults},
         )
         return RecordingAsyncClient.calls[-1]["headers"]
@@ -386,7 +386,7 @@ class RelayedHeadersTest(IsolatedAsyncioTestCase):
 
     async def test_uuid_only_session_requires_explicit_reconnection(self):
         result, chat, token = await query_biel_ai(
-            {"message": "hi", "project_slug": "abc123"}, {"chat_uuid": "legacy-chat"}
+            {"message": "hi", "project_slug": "abc123", "mode": "answer"}, {"chat_uuid": "legacy-chat"}
         )
         self.assertTrue(result["isError"])
         self.assertEqual(RecordingAsyncClient.calls, [])
@@ -397,6 +397,7 @@ class RelayedHeadersTest(IsolatedAsyncioTestCase):
         result, _, _ = await query_biel_ai(
             {
                 "message": "hi",
+                "mode": "answer",
                 "project_slug": "abc123",
                 "chat_uuid": "other-chat",
             },
@@ -412,7 +413,7 @@ class RelayedHeadersTest(IsolatedAsyncioTestCase):
 
     async def test_matching_explicit_uuid_keeps_existing_clients_authorized(self):
         result, _, _ = await query_biel_ai(
-            {"message": "hi", "project_slug": "abc123", "chat_uuid": "chat-1"},
+            {"message": "hi", "project_slug": "abc123", "chat_uuid": "chat-1", "mode": "answer"},
             {"chat_uuid": "chat-1", "restore_token": "restore-1"},
         )
         self.assertFalse(result["isError"])
@@ -459,7 +460,7 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/call",
-            "params": {"name": "biel_ai", "arguments": {"message": "hi"}},
+            "params": {"name": "biel_ai", "arguments": {"message": "hi", "mode": "answer"}},
         }
 
     async def test_the_client_named_at_initialize_labels_a_later_tool_call(self):
@@ -591,6 +592,15 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
 
 
 class SearchModeTest(IsolatedAsyncioTestCase):
+    async def test_omitting_mode_searches_without_generating_an_answer(self):
+        RecordingAsyncClient.calls = []
+        with patch("biel_mcp.server.httpx.AsyncClient", RecordingAsyncClient):
+            result, chat, token = await query_biel_ai({"message": "SDK auth"}, {"project_slug": "docs"})
+        self.assertFalse(result["isError"])
+        self.assertIsNone(chat)
+        self.assertIsNone(token)
+        self.assertTrue(RecordingAsyncClient.calls[0]["url"].endswith("/search/"))
+
     async def test_search_uses_get_with_project_credentials_without_chat_capabilities(self):
         RecordingAsyncClient.calls = []
         with patch("biel_mcp.server.httpx.AsyncClient", RecordingAsyncClient):

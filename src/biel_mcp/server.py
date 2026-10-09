@@ -7,8 +7,10 @@ Allows querying your AI from editors like Cursor via MCP over HTTP
 import asyncio
 import json
 import logging
+import math
 import os
 import re
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Dict, Optional, Protocol
@@ -28,7 +30,12 @@ DEFAULT_BASE_URL = "https://app.biel.ai"
 BIEL_API_PATH_TEMPLATE = "/api/v2/projects/{project_slug}/chats/"
 MCP_PROTOCOL_VERSION = "2024-11-05"
 MCP_PROTOCOL_VERSION_V2 = "2025-11-25"
-REQUEST_TIMEOUT = 30.0
+API_READ_TIMEOUT_SECONDS = float(os.environ.get("BIEL_MCP_READ_TIMEOUT_SECONDS", "60"))
+if not math.isfinite(API_READ_TIMEOUT_SECONDS) or API_READ_TIMEOUT_SECONDS <= 0:
+    raise ValueError("BIEL_MCP_READ_TIMEOUT_SECONDS must be a positive finite number")
+REQUEST_TIMEOUT = httpx.Timeout(
+    API_READ_TIMEOUT_SECONDS, connect=5.0, write=10.0, pool=5.0
+)
 KEEPALIVE_INTERVAL = 30
 SESSION_TIMEOUT = 300  # 5 minutes
 
@@ -121,7 +128,7 @@ class InMemorySessionStore:
         ]
         for sid in expired:
             del self.sessions[sid]
-            logger.info(f"Expired session {sid}")
+            logger.info("MCP session expired", extra={"event": "mcp.session_expired"})
 
 
 class SessionManager:
@@ -153,7 +160,7 @@ class SessionManager:
             "created_at": datetime.now(),
             "last_active": datetime.now()
         })
-        logger.info(f"Created session {session_id} for project {project_slug}")
+        logger.info("MCP session created", extra={"event": "mcp.session_created"})
         return session_id
 
     async def record_client_info(self, session_id: str, client_name: str,
@@ -210,7 +217,7 @@ class SessionManager:
     async def delete_session(self, session_id: str) -> bool:
         """Delete a session."""
         if await self._store.delete(session_id):
-            logger.info(f"Deleted session {session_id}")
+            logger.info("MCP session deleted", extra={"event": "mcp.session_deleted"})
             return True
         return False
 
@@ -233,11 +240,6 @@ TOOLS = [
                 "api_key": {
                     "type": "string",
                     "description": "API key for authentication (optional)",
-                    "default": ""
-                },
-                "chat_uuid": {
-                    "type": "string",
-                    "description": "Chat UUID to continue conversation (optional)",
                     "default": ""
                 },
                 "domain": {
@@ -304,9 +306,9 @@ app.state.api_base_url = normalize_base_url(DEFAULT_BASE_URL)
 app.state.allowed_base_urls = frozenset({normalize_base_url(DEFAULT_BASE_URL)})
 
 
-def create_error_response(message: str) -> Dict[str, str]:
+def create_error_response(message: str) -> Dict[str, Any]:
     """Create a standardized error response."""
-    return {"type": "text", "text": f"Error: {message}"}
+    return {"content": [{"type": "text", "text": f"Error: {message}"}], "isError": True}
 
 
 def get_client_ip(request: Request) -> str:
@@ -360,17 +362,20 @@ def extract_client_info(data: Dict[str, Any]) -> tuple[str, str]:
     return header_safe(client_info.get("name")), header_safe(client_info.get("version"))
 
 
-def create_success_response(text: str) -> Dict[str, str]:
+def create_success_response(text: str) -> Dict[str, Any]:
     """Create a standardized success response."""
-    return {"type": "text", "text": text}
+    return {"content": [{"type": "text", "text": text}], "isError": False}
 
 
 def validate_biel_request(arguments: Dict[str, Any]) -> Optional[str]:
     """Validate Biel.ai request arguments. Returns error message if invalid, None if valid."""
-    if not arguments.get("message", "").strip():
+    if not isinstance(arguments.get("message"), str) or not arguments["message"].strip():
         return "Message cannot be empty"
 
-    project_slug = arguments.get("project_slug", "").strip()
+    project_slug = arguments.get("project_slug", "")
+    if not isinstance(project_slug, str):
+        return "Project slug must be a string"
+    project_slug = project_slug.strip()
     if not project_slug:
         return "Project slug is required"
 
@@ -384,7 +389,6 @@ def format_biel_response(data: Dict[str, Any]) -> str:
     """Format the response from Biel.ai API into a readable string."""
     ai_message = data.get("ai_message", {})
     ai_response = ai_message.get("message", "No response received")
-    chat_uuid = data.get("chat_uuid", "")
     sources = ai_message.get("sources", [])
 
     response_parts = [f"🤖 **Biel.ai responds:**\n\n{ai_response}"]
@@ -394,19 +398,42 @@ def format_biel_response(data: Dict[str, Any]) -> str:
         for source in sources:
             response_parts.append(f"• [{source['title']}]({source['url']})")
 
-    if chat_uuid:
-        response_parts.append(f"\n💬 *Chat UUID: {chat_uuid}* (to continue conversation)")
-
     return "\n".join(response_parts)
 
 
 async def query_biel_ai(
     arguments: Dict[str, Any], defaults: Dict[str, str] = None
-) -> tuple[Dict[str, str], Optional[str], Optional[str]]:
+) -> tuple[Dict[str, Any], Optional[str], Optional[str]]:
     """
     Query Biel.ai API with the provided arguments.
     Returns ``(response_dict, new_chat_uuid, new_restore_token)``.
     """
+    if not isinstance(arguments, dict):
+        return create_error_response("Tool arguments must be an object."), None, None
+    arguments = dict(arguments)
+    session_project = (defaults or {}).get("project_slug")
+    if session_project and arguments.get("project_slug") not in (None, "", session_project):
+        return create_error_response("The project is fixed by this connection."), None, None
+    requested_chat = arguments.get("chat_uuid")
+    session_chat = (defaults or {}).get("chat_uuid")
+    session_token = (defaults or {}).get("restore_token")
+    if requested_chat and (requested_chat != session_chat or not session_token):
+        logger.warning(
+            "MCP continuation unavailable",
+            extra={"event": "mcp.continuation_rejected", "error_kind": "session_mismatch"},
+        )
+        return create_error_response(
+            "This conversation cannot be resumed by this connection. "
+            "Reconnect to start a new conversation; do not supply a chat UUID."
+        ), None, None
+    if session_chat and not session_token:
+        logger.warning(
+            "MCP continuation unavailable",
+            extra={"event": "mcp.continuation_rejected", "error_kind": "missing_capability"},
+        )
+        return create_error_response(
+            "This connection cannot resume its conversation. Reconnect to start a new conversation."
+        ), None, None
     # Apply defaults from connection if not provided in arguments
     if defaults:
         if not arguments.get("project_slug") and defaults.get("project_slug"):
@@ -421,10 +448,7 @@ async def query_biel_ai(
         if not arguments.get("metadata") and defaults.get("metadata"):
             arguments["metadata"] = defaults["metadata"]
 
-        # A UUID without its bearer capability can no longer authorize a
-        # continuation. Legacy sessions created before capability persistence
-        # therefore start a fresh conversation instead of generating a noisy
-        # 403 on every follow-up.
+        # A continuation requires the UUID and its matching bearer capability.
         if (
             not arguments.get("chat_uuid")
             and defaults.get("chat_uuid")
@@ -482,7 +506,7 @@ async def query_biel_ai(
     # Forward which MCP client asked, so a query can be attributed to Claude
     # Code, Copilot, Codex, Cursor and the rest. The handshake identity is the
     # reliable one; the User-Agent goes too because transports without a
-    # session (v1 SSE) and sessions recreated after expiry have nothing else.
+    # session (v1 SSE) have nothing else.
     if client_name:
         headers["X-MCP-Client-Name"] = client_name
     if client_version:
@@ -492,15 +516,20 @@ async def query_biel_ai(
 
     full_url = f"{base_url.rstrip('/')}{BIEL_API_PATH_TEMPLATE.format(project_slug=project_slug)}"
 
-    logger.info(f"Querying Biel.ai: {message[:50]}... (project: {project_slug})")
-
+    started = time.monotonic()
+    outcome = "upstream_error"
+    upstream_status = None
+    upstream_request_id = ""
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             response = await client.post(full_url, json=payload, headers=headers)
+            upstream_status = response.status_code
+            upstream_request_id = header_safe(response.headers.get("x-request-id", ""))
 
             if response.status_code in (200, 201):
                 data = response.json()
                 formatted_response = format_biel_response(data)
+                outcome = "success"
                 # Persist the pair together: the token is bound to this chat.
                 return (
                     create_success_response(formatted_response),
@@ -508,24 +537,41 @@ async def query_biel_ai(
                     data.get("restore_token"),
                 )
             else:
-                error_msg = f"HTTP {response.status_code}: {response.text}"
-                logger.error(f"Biel.ai API error: {error_msg}")
+                error_msg = f"Biel.ai API returned HTTP {response.status_code}."
+                if response.status_code == 403:
+                    error_msg += " Check project access or reconnect to start a new conversation."
+                elif response.status_code == 404:
+                    error_msg += " The project or conversation is unavailable; check the connection and reconnect."
                 return (
-                    create_error_response(f"Biel.ai API error: {error_msg}"),
+                    create_error_response(error_msg),
                     None,
                     None,
                 )
 
     except httpx.TimeoutException:
-        logger.error("Timeout querying Biel.ai")
+        outcome = "timeout"
         return (
             create_error_response("⏱️ Timeout: Biel.ai took too long to respond"),
             None,
             None,
         )
-    except Exception as e:
-        logger.error(f"Unexpected error querying Biel.ai: {e}")
-        return create_error_response(f"Unexpected error: {str(e)}"), None, None
+    except Exception:
+        outcome = "transport_error"
+        return create_error_response("Biel.ai could not complete the request. Please try again."), None, None
+    finally:
+        logger.log(
+            logging.INFO if outcome == "success" else logging.ERROR,
+            "MCP upstream request completed",
+            extra={
+                "event": "mcp.upstream_completed",
+                "error_kind": outcome,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "upstream_status": upstream_status,
+                "upstream_request_id": upstream_request_id,
+                "has_continuation": bool(chat_uuid),
+                "read_timeout_seconds": API_READ_TIMEOUT_SECONDS,
+            },
+        )
 
 
 def create_mcp_response(msg_id: Optional[str], result: Optional[Dict] = None,
@@ -552,20 +598,13 @@ async def handle_mcp_request(data: Dict[str, Any], defaults: Dict[str, str] = No
         method = data.get("method")
         msg_id = data.get("id")
 
-        logger.info(f"Handling MCP request: {method} (session: {session_id})")
+        logger.debug("MCP request received", extra={"event": "mcp.request_received"})
 
         if method == "initialize":
             # For v2 (Streamable HTTP), we might need to create a session
             # The session_id will be returned in the Mcp-Session-Id header
             # Use V1 version for SSE (no session_id) and V2 for Streamable HTTP
             protocol_version = MCP_PROTOCOL_VERSION_V2 if session_id else MCP_PROTOCOL_VERSION
-
-            client_name, client_version = extract_client_info(data)
-            if client_name:
-                logger.info(
-                    f"MCP client identified: {client_name} v{client_version} "
-                    f"(session: {session_id})"
-                )
 
             result = {
                 "protocolVersion": protocol_version,
@@ -597,12 +636,12 @@ async def handle_mcp_request(data: Dict[str, Any], defaults: Dict[str, str] = No
                     and new_restore_token
                     and sessions
                 ):
-                    in_force, _ = await sessions.record_chat_credentials(
+                    await sessions.record_chat_credentials(
                         session_id, new_chat_uuid, new_restore_token
                     )
-                    logger.info(f"Session {session_id} threads chat_uuid: {in_force}")
+                    logger.debug("MCP conversation stored", extra={"event": "mcp.conversation_stored"})
 
-                return create_mcp_response(msg_id, {"content": [result]})
+                return create_mcp_response(msg_id, result)
             else:
                 return create_mcp_response(
                     msg_id,
@@ -615,11 +654,11 @@ async def handle_mcp_request(data: Dict[str, Any], defaults: Dict[str, str] = No
                 error={"code": UNKNOWN_METHOD_ERROR, "message": f"Unknown method: {method}"}
             )
 
-    except Exception as e:
-        logger.error(f"Error handling MCP message: {e}")
+    except Exception:
+        logger.error("MCP message handling failed", extra={"event": "mcp.message_failed"})
         return create_mcp_response(
             data.get("id") if isinstance(data, dict) else None,
-            error={"code": UNKNOWN_METHOD_ERROR, "message": str(e)}
+            error={"code": UNKNOWN_METHOD_ERROR, "message": "Request could not be completed"}
         )
 
 
@@ -629,7 +668,7 @@ async def mcp_sse_generator(request: Request, message: Optional[str] = None, def
         if message:
             try:
                 mcp_request = json.loads(message)
-                logger.info(f"Processing MCP request: {mcp_request.get('method', 'unknown')}")
+                logger.debug("MCP SSE message received", extra={"event": "mcp.sse_message_received"})
 
                 response = await handle_mcp_request(mcp_request, defaults)
                 yield {
@@ -663,8 +702,8 @@ async def mcp_sse_generator(request: Request, message: Optional[str] = None, def
 
     except asyncio.CancelledError:
         logger.info("SSE connection cancelled")
-    except Exception as e:
-        logger.error(f"SSE error: {e}")
+    except Exception:
+        logger.error("MCP SSE failed", extra={"event": "mcp.sse_failed"})
 
 
 # ============================================================================
@@ -693,7 +732,7 @@ async def sse_endpoint_v1(
         base_url, request.app.state.allowed_base_urls, request.app.state.api_base_url
     )
     if resolved_base_url is None:
-        logger.warning(f"Rejected base_url {base_url!r} (project: {project_slug})")
+        logger.warning("MCP API origin rejected", extra={"event": "mcp.origin_rejected"})
         return JSONResponse(
             {"error": "base_url is not an allowed Biel.ai instance"},
             status_code=400
@@ -738,7 +777,7 @@ async def sse_post_endpoint_v1(
         base_url, request.app.state.allowed_base_urls, request.app.state.api_base_url
     )
     if resolved_base_url is None:
-        logger.warning(f"Rejected base_url {base_url!r} (project: {project_slug})")
+        logger.warning("MCP API origin rejected", extra={"event": "mcp.origin_rejected"})
         return JSONResponse(
             {"error": "base_url is not an allowed Biel.ai instance"},
             status_code=400
@@ -763,10 +802,10 @@ async def sse_post_endpoint_v1(
         data = await request.json()
         response = await handle_mcp_request(data, defaults)
         return JSONResponse(response)
-    except Exception as e:
-        logger.error(f"Error handling POST to SSE: {e}")
+    except Exception:
+        logger.error("MCP SSE POST failed", extra={"event": "mcp.sse_post_failed"})
         return JSONResponse(
-            create_mcp_response(None, error={"code": UNKNOWN_METHOD_ERROR, "message": str(e)}),
+            create_mcp_response(None, error={"code": UNKNOWN_METHOD_ERROR, "message": "Request could not be completed"}),
             status_code=500
         )
 
@@ -814,7 +853,7 @@ async def streamable_http_endpoint_v2(
     Supports both POST (for requests) and GET (for SSE streaming).
     Uses project_slug from URL path and session management via MCP-Session-Id header.
     """
-    logger.info(f"V2 Streamable HTTP endpoint accessed: {request.method} (project: {project_slug})")
+    logger.debug("MCP transport accessed", extra={"event": "mcp.transport_accessed"})
 
     # Validate protocol version header (required for all requests except OPTIONS)
     if request.method != "OPTIONS":
@@ -831,7 +870,7 @@ async def streamable_http_endpoint_v2(
     # Validate Origin header to prevent DNS rebinding attacks
     origin = request.headers.get("Origin")
     if origin:
-        logger.info(f"Request from origin: {origin}")
+        logger.debug("MCP Origin header supplied", extra={"event": "mcp.origin_received"})
 
     sessions: SessionManager = request.app.state.session_manager
 
@@ -846,7 +885,7 @@ async def streamable_http_endpoint_v2(
         base_url, request.app.state.allowed_base_urls, request.app.state.api_base_url
     )
     if resolved_base_url is None:
-        logger.warning(f"Rejected base_url {base_url!r} (project: {project_slug})")
+        logger.warning("MCP API origin rejected", extra={"event": "mcp.origin_rejected"})
         return JSONResponse(
             {"error": "base_url is not an allowed Biel.ai instance"},
             status_code=400
@@ -878,13 +917,13 @@ async def streamable_http_endpoint_v2(
                 # Get or create session
                 if mcp_session_id:
                     session = await sessions.get_session(mcp_session_id)
-                    if not session:
+                    if not session or session["project_slug"] != project_slug:
                         return JSONResponse(
                             create_mcp_response(
                                 data.get("id"),
                                 error={"code": -32000, "message": "Invalid session ID"}
                             ),
-                            status_code=400
+                            status_code=404
                         )
                     await sessions.record_client_info(
                         mcp_session_id, client_name, client_version
@@ -923,44 +962,21 @@ async def streamable_http_endpoint_v2(
                     status_code=400
                 )
 
-            # Validate session - auto-recreate if expired
             session = await sessions.get_session(mcp_session_id)
-            session_recreated = False
-            if not session:
-                if not project_slug:
-                    return JSONResponse(
-                        create_mcp_response(
-                            data.get("id"),
-                            error={"code": -32000, "message": "Invalid session ID"}
-                        ),
-                        status_code=400
-                    )
+            if not session or session["project_slug"] != project_slug:
                 logger.warning(
-                    f"Session {mcp_session_id[:8]}... expired or not found, recreating for project {project_slug}"
+                    "MCP session unavailable",
+                    extra={"event": "mcp.session_rejected", "error_kind": "session_unavailable"},
                 )
-                mcp_session_id = await sessions.create_session(
-                    project_slug=project_slug,
-                    api_key=api_key or "",
-                    base_url=resolved_base_url,
-                    domain=domain or "",
-                    metadata=metadata or ""
+                return JSONResponse(
+                    create_mcp_response(
+                        data.get("id"),
+                        error={"code": -32000, "message": "Session unavailable. Initialize a new connection."},
+                    ),
+                    status_code=404,
                 )
-                session = await sessions.get_session(mcp_session_id)
-                if not session:
-                    # A shared store can lose the record between the write and
-                    # this read (eviction, failover). Say so, rather than
-                    # dereferencing None into an opaque 500.
-                    return JSONResponse(
-                        create_mcp_response(
-                            data.get("id"),
-                            error={
-                                "code": -32000,
-                                "message": "Session storage unavailable, retry"
-                            }
-                        ),
-                        status_code=503
-                    )
-                session_recreated = True
+            if method == "notifications/initialized":
+                return Response(status_code=202)
 
             # Use session defaults
             session_defaults = {
@@ -973,8 +989,7 @@ async def streamable_http_endpoint_v2(
                 "metadata": session["metadata"],
                 "chat_uuid": session.get("chat_uuid", ""),  # Pass current chat_uuid to maintain context
                 "restore_token": session.get("restore_token", ""),
-                # Recorded at initialize; absent on a session recreated after
-                # expiry, where the User-Agent carries what identity is left.
+                # Recorded at initialize; User-Agent covers clients with no identity.
                 "client_name": session.get("client_name", ""),
                 "client_version": session.get("client_version", "")
             }
@@ -983,8 +998,7 @@ async def streamable_http_endpoint_v2(
             mcp_response = await handle_mcp_request(
                 data, session_defaults, mcp_session_id, sessions
             )
-            response_headers = {"MCP-Session-Id": mcp_session_id} if session_recreated else None
-            return JSONResponse(mcp_response, headers=response_headers)
+            return JSONResponse(mcp_response)
 
         except json.JSONDecodeError:
             return JSONResponse(
@@ -994,12 +1008,12 @@ async def streamable_http_endpoint_v2(
                 ),
                 status_code=400
             )
-        except Exception as e:
-            logger.error(f"Error handling V2 POST: {e}")
+        except Exception:
+            logger.error("MCP POST failed", extra={"event": "mcp.post_failed"})
             return JSONResponse(
                 create_mcp_response(
                     None,
-                    error={"code": -32000, "message": str(e)}
+                    error={"code": -32000, "message": "Request could not be completed"}
                 ),
                 status_code=500
             )
@@ -1010,7 +1024,7 @@ async def streamable_http_endpoint_v2(
         last_event_id = request.headers.get("Last-Event-ID")
 
         if last_event_id:
-            logger.info(f"Resuming stream from Last-Event-ID: {last_event_id}")
+            logger.debug("MCP stream resume requested", extra={"event": "mcp.stream_resume_requested"})
 
         # Session is required for GET (unless resuming with Last-Event-ID)
         if not mcp_session_id and not last_event_id:
@@ -1022,7 +1036,7 @@ async def streamable_http_endpoint_v2(
         # Validate session if provided
         if mcp_session_id:
             session = await sessions.get_session(mcp_session_id)
-            if not session:
+            if not session or session["project_slug"] != project_slug:
                 return JSONResponse(
                     {"error": "Invalid session ID"},
                     status_code=404  # 404 as per spec when session not found
@@ -1054,9 +1068,9 @@ async def streamable_http_endpoint_v2(
                     }
                     event_counter += 1
             except asyncio.CancelledError:
-                logger.info(f"SSE stream cancelled for session {mcp_session_id}")
-            except Exception as e:
-                logger.error(f"SSE stream error: {e}")
+                logger.info("MCP stream cancelled", extra={"event": "mcp.stream_cancelled"})
+            except Exception:
+                logger.error("MCP stream failed", extra={"event": "mcp.stream_failed"})
 
         return EventSourceResponse(sse_stream())
 
@@ -1069,7 +1083,7 @@ async def delete_session_v2(
     mcp_session_id: Optional[str] = Header(None, alias="MCP-Session-Id")
 ):
     """V2: Delete/terminate a session."""
-    logger.info(f"V2 DELETE endpoint accessed (project: {project_slug})")
+    logger.debug("MCP termination requested", extra={"event": "mcp.termination_requested"})
 
     if not mcp_session_id:
         return JSONResponse(
@@ -1078,7 +1092,8 @@ async def delete_session_v2(
         )
 
     sessions: SessionManager = request.app.state.session_manager
-    if await sessions.delete_session(mcp_session_id):
+    session = await sessions.get_session(mcp_session_id)
+    if session and session["project_slug"] == project_slug and await sessions.delete_session(mcp_session_id):
         return JSONResponse({"status": "session terminated"})
     else:
         return JSONResponse(
@@ -1167,12 +1182,29 @@ async def health():
     return {"status": "ok", "version": SERVER_VERSION}
 
 
+class MCPLogFormatter(logging.Formatter):
+    """Render standalone diagnostic fields without credential or payload data."""
+
+    converter = time.gmtime
+
+    def format(self, record):
+        data = {
+            "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%SZ"),
+            "level": record.levelname, "logger": record.name,
+            "message": record.getMessage(),
+        }
+        for field in ("event", "error_kind", "duration_ms", "upstream_status",
+                      "upstream_request_id", "has_continuation", "read_timeout_seconds"):
+            if hasattr(record, field):
+                data[field] = getattr(record, field)
+        return json.dumps(data)
+
+
 def main() -> None:
     """Run the standalone MCP server."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    handler = logging.StreamHandler()
+    handler.setFormatter(MCPLogFormatter())
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
     # A self-hosted Biel instance is named here, by the operator, rather than
     # by whoever calls the server.
     app.state.api_base_url = normalize_base_url(

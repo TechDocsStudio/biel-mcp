@@ -1,17 +1,21 @@
 import json
+import logging
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
 
 import httpx
-
 from biel_mcp.server import (
     CLIENT_IDENTITY_MAX_LENGTH,
     MCP_PROTOCOL_VERSION_V2,
+    REQUEST_TIMEOUT,
+    TOOLS,
     InMemorySessionStore,
+    MCPLogFormatter,
     SessionManager,
     app,
     extract_client_info,
+    format_biel_response,
     header_safe,
     normalize_base_url,
     query_biel_ai,
@@ -42,6 +46,7 @@ class RecordingAsyncClient:
         type(self).calls.append({"url": url, "json": json, "headers": headers})
         return SimpleNamespace(
             status_code=200,
+            headers={},
             json=lambda: {
                 "chat_uuid": "chat-1",
                 "restore_token": "restore-1",
@@ -51,6 +56,30 @@ class RecordingAsyncClient:
 
 
 class ConfigurationTest(TestCase):
+    def test_standalone_logs_preserve_safe_upstream_diagnostics(self):
+        record = logging.makeLogRecord({
+            "msg": "MCP upstream request completed", "levelname": "ERROR",
+            "event": "mcp.upstream_completed", "upstream_status": 404,
+            "duration_ms": 27, "upstream_request_id": "request-1",
+            "restore_token": "private-token", "chat_uuid": "private-chat",
+        })
+        data = json.loads(MCPLogFormatter().format(record))
+        self.assertEqual(data["duration_ms"], 27)
+        self.assertEqual(data["upstream_status"], 404)
+        self.assertEqual(data["upstream_request_id"], "request-1")
+        self.assertNotIn("private", json.dumps(data))
+
+    def test_read_timeout_has_headroom_without_lengthening_connection_waits(self):
+        self.assertEqual(REQUEST_TIMEOUT.read, 60)
+        self.assertEqual(REQUEST_TIMEOUT.connect, 5)
+        self.assertEqual(REQUEST_TIMEOUT.write, 10)
+        self.assertEqual(REQUEST_TIMEOUT.pool, 5)
+
+    def test_tool_does_not_advertise_unsecured_manual_continuation(self):
+        self.assertNotIn("chat_uuid", TOOLS[0]["inputSchema"]["properties"])
+        answer = format_biel_response({"chat_uuid": "chat-1", "ai_message": {"message": "answer"}})
+        self.assertNotIn("chat-1", answer)
+
     def test_normalize_base_url_strips_whitespace_and_trailing_slash(self):
         self.assertEqual(normalize_base_url(" https://app.biel.ai/ "), "https://app.biel.ai")
 
@@ -112,7 +141,7 @@ class ApplicationTest(IsolatedAsyncioTestCase):
         with patch(
             "biel_mcp.server.query_biel_ai",
             return_value=(
-                {"type": "text", "text": "answer"},
+                {"content": [{"type": "text", "text": "answer"}], "isError": False},
                 "chat-1",
                 "restore-1",
             ),
@@ -319,14 +348,17 @@ class RelayedHeadersTest(IsolatedAsyncioTestCase):
         self.assertEqual(headers["X-Chat-Restore-Token"], "restore-1")
         self.assertEqual(RecordingAsyncClient.calls[-1]["json"]["chat_uuid"], "chat-1")
 
-    async def test_legacy_uuid_only_session_starts_fresh_without_a_403(self):
-        headers = await self.relay({"chat_uuid": "legacy-chat"})
-
-        self.assertNotIn("X-Chat-Restore-Token", headers)
-        self.assertNotIn("chat_uuid", RecordingAsyncClient.calls[-1]["json"])
+    async def test_uuid_only_session_requires_explicit_reconnection(self):
+        result, chat, token = await query_biel_ai(
+            {"message": "hi", "project_slug": "abc123"}, {"chat_uuid": "legacy-chat"}
+        )
+        self.assertTrue(result["isError"])
+        self.assertEqual(RecordingAsyncClient.calls, [])
+        self.assertIsNone(chat)
+        self.assertIsNone(token)
 
     async def test_capability_is_not_relayed_for_a_caller_supplied_chat(self):
-        await query_biel_ai(
+        result, _, _ = await query_biel_ai(
             {
                 "message": "hi",
                 "project_slug": "abc123",
@@ -339,9 +371,16 @@ class RelayedHeadersTest(IsolatedAsyncioTestCase):
             },
         )
 
-        self.assertNotIn(
-            "X-Chat-Restore-Token", RecordingAsyncClient.calls[-1]["headers"]
+        self.assertTrue(result["isError"])
+        self.assertEqual(RecordingAsyncClient.calls, [])
+
+    async def test_matching_explicit_uuid_keeps_existing_clients_authorized(self):
+        result, _, _ = await query_biel_ai(
+            {"message": "hi", "project_slug": "abc123", "chat_uuid": "chat-1"},
+            {"chat_uuid": "chat-1", "restore_token": "restore-1"},
         )
+        self.assertFalse(result["isError"])
+        self.assertEqual(RecordingAsyncClient.calls[-1]["headers"]["X-Chat-Restore-Token"], "restore-1")
 
 
 class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
@@ -444,3 +483,87 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
         self.assertEqual(
             second_relay["headers"]["X-Chat-Restore-Token"], "restore-1"
         )
+
+    async def test_initialized_notification_is_accepted_without_a_response_body(self):
+        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            initialized = await self.post_mcp(client, self.initialize_body())
+            response = await self.post_mcp(client, {"jsonrpc": "2.0", "method": "notifications/initialized"}, initialized.headers["MCP-Session-Id"])
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.content, b"")
+
+    async def test_expired_session_returns_404_without_creating_a_conversation(self):
+        session = await app.state.session_manager.create_session(project_slug="abc123")
+        await app.state.session_manager.delete_session(session)
+        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await self.post_mcp(client, self.call_body(), session)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(RecordingAsyncClient.calls, [])
+        self.assertIsNone(await app.state.session_manager.get_session(session))
+
+    async def test_session_cannot_be_used_at_another_project_path(self):
+        session = await app.state.session_manager.create_session(project_slug="different-project")
+        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            for body in (self.initialize_body(), self.call_body()):
+                response = await self.post_mcp(client, body, session)
+                self.assertEqual(response.status_code, 404)
+            headers = {"MCP-Session-Id": session}
+            for method in (client.get, client.delete):
+                response = await method("/mcp/abc123", headers=headers)
+                self.assertEqual(response.status_code, 404)
+        self.assertEqual(RecordingAsyncClient.calls, [])
+        self.assertIsNotNone(await app.state.session_manager.get_session(session))
+
+    async def test_tool_cannot_override_connection_project(self):
+        session = await app.state.session_manager.create_session(project_slug="abc123")
+        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            body = self.call_body()
+            body["params"]["arguments"]["project_slug"] = "another-project"
+            response = await self.post_mcp(client, body, session)
+        self.assertTrue(response.json()["result"]["isError"])
+        self.assertEqual(RecordingAsyncClient.calls, [])
+        stored = await app.state.session_manager.get_session(session)
+        self.assertFalse(stored.get("chat_uuid"))
+
+    async def test_reconnected_client_cannot_continue_with_a_previous_uuid(self):
+        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            initialized = await self.post_mcp(client, self.initialize_body())
+            body = self.call_body()
+            body["params"]["arguments"]["chat_uuid"] = "chat-1"
+            response = await self.post_mcp(client, body, initialized.headers["MCP-Session-Id"])
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["result"]["isError"])
+        self.assertEqual(RecordingAsyncClient.calls, [])
+
+
+class UpstreamFailuresTest(IsolatedAsyncioTestCase):
+    async def query(self, transport):
+        client = RealAsyncClient(transport=transport)
+        with patch("biel_mcp.server.httpx.AsyncClient", return_value=client):
+            return await query_biel_ai({"message": "private question", "project_slug": "docs"})
+
+    async def test_http_errors_are_tool_errors_and_do_not_echo_backend_payloads(self):
+        for status in (403, 404, 429, 500):
+            with self.subTest(status=status):
+                transport = httpx.MockTransport(lambda request, code=status: httpx.Response(code, text="secret-backend-payload", headers={"x-request-id": "upstream-id"}))
+                with self.assertLogs("biel-mcp", level="ERROR") as captured:
+                    result, chat, token = await self.query(transport)
+                self.assertTrue(result["isError"])
+                self.assertIsNone(chat)
+                self.assertIsNone(token)
+                self.assertNotIn("secret-backend-payload", str(result))
+                self.assertNotIn("private question", str(captured.output))
+                record = captured.records[-1]
+                self.assertEqual(record.upstream_status, status)
+                self.assertEqual(record.upstream_request_id, "upstream-id")
+                self.assertEqual(record.error_kind, "upstream_error")
+                self.assertGreaterEqual(record.duration_ms, 0)
+
+    async def test_read_timeout_is_reported_separately_from_http_rejections(self):
+        def timeout(request):
+            raise httpx.ReadTimeout("secret-backend-payload")
+        with self.assertLogs("biel-mcp", level="ERROR") as captured:
+            result, _, _ = await self.query(httpx.MockTransport(timeout))
+        self.assertTrue(result["isError"])
+        self.assertEqual(captured.records[-1].error_kind, "timeout")
+        self.assertIsNone(captured.records[-1].upstream_status)
+        self.assertNotIn("secret-backend-payload", str(result))

@@ -57,13 +57,19 @@ Can you check in biel_ai what the auth headers are for the /users endpoint?
 
 ## Choose generated answers or search
 
-The `biel_ai` tool accepts `mode: "answer" | "search"` and defaults to `search`. Use concise terms to retrieve ranked content from indexed web pages, uploaded files, repositories and OpenAPI sources without waiting for Biel.ai to generate an answer. The calling model can then compose an answer from those sources. Select `mode: "answer"` explicitly when the user wants Biel.ai to generate the response; that mode supports conversation context.
+The server exposes three tools:
+
+- `biel_ai`: ask Biel.ai to generate an answer, with conversational context. Existing calls using `message` continue to generate answers.
+- `biel_search`: hybrid keyword and semantic search over indexed web pages, uploaded files, repositories and OpenAPI sources, without answer generation.
+- `biel_get_document`: read the complete indexed text of a document returned by search.
+
+Call `biel_search` with a natural-language question or search terms:
 
 ```json
-{"message": "SDK authentication", "mode": "search"}
+{"query": "How do I authenticate with the SDK?", "limit": 5}
 ```
 
-Search requests the API's `content_scope=all`. Results include chunk text, source type, a `document_id`, and any page/sheet reference; non-URL documents are cited by title and location. The `limit` argument controls how many chunks are returned (default 5, maximum 20).
+Search requests the API's `search_type=hybrid&source_types=all`. The REST API defaults to `search_type=keyword`, independently of the selected sources. Results include chunk text, source type, a `document_id`, and any page/sheet reference; non-URL documents are cited by title and location. The `limit` argument controls how many chunks are returned (default 5, maximum 20).
 
 Use `biel_get_document` with a search result's `document_id` to read the complete indexed document without visiting its source site:
 

@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 from sse_starlette import EventSourceResponse
 
 # Constants
-SERVER_VERSION = "2.0.0"
+SERVER_VERSION = "2.1.0"
 SERVER_NAME = "biel-ai-mcp"
 DEFAULT_PORT = 7832
 DEFAULT_BASE_URL = "https://app.biel.ai"
@@ -232,43 +232,19 @@ TOOLS = [
     {
         "name": "biel_ai",
         "description": (
-            "Search this Biel.ai project's indexed product documentation and knowledge "
-            "base, or get an answer grounded in those sources. Use for product setup, "
-            "configuration, API and SDK usage, integrations, troubleshooting, and "
-            "locating supporting documentation. Content can include product guides, "
-            "API references, help articles, uploaded documents, repository content "
-            "and OpenAPI sources. Choose mode='search' to retrieve ranked text chunks "
-            "and source references without Biel.ai answer generation; start with search "
-            "for documentation questions and use biel_get_document for complete indexed text. Use concise "
-            "keywords and write your own answer from the retrieved sources. Choose "
-            "mode='answer' only when the user explicitly requests a Biel.ai-generated response. "
-            "If you want Biel.ai to answer instead, ask the user first; do not fall back to answer automatically. "
-            "Answer mode supports conversational context. "
-            "Results are limited to this project's indexed content."
+            "Ask Biel.ai to generate an answer grounded in this project's indexed "
+            "product documentation, APIs, SDKs and knowledge base. Supports conversational "
+            "context within this connection. Use when the user explicitly requests a "
+            "Biel.ai-generated response; otherwise ask the user first. For source retrieval "
+            "and your own answer, use biel_search and biel_get_document. "
+            "Do not fall back to biel_ai automatically on a retrieval error."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "message": {
                     "type": "string",
-                    "description": "Question for answer mode, or concise search terms for search mode"
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["answer", "search"],
-                    "default": "search",
-                    "description": (
-                        "search: retrieve source text chunks and references without generating an answer. "
-                        "answer: generate a response using Biel.ai; can take longer. "
-                        "Private projects require a key with the corresponding search or chats_create scope."
-                    )
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 20,
-                    "default": 5,
-                    "description": "Maximum source chunks returned in search mode; ignored in answer mode"
+                    "description": "Question for Biel.ai to answer"
                 },
                 "api_key": {
                     "type": "string",
@@ -290,9 +266,34 @@ TOOLS = [
         }
     },
     {
+        "name": "biel_search",
+        "description": (
+            "Search this project's indexed documentation using hybrid keyword and semantic "
+            "retrieval. Use for product setup, API and SDK usage, configuration and "
+            "troubleshooting. Searches web pages, uploaded files, repositories and OpenAPI "
+            "sources without generating a Biel.ai answer. Start here for documentation "
+            "questions; natural-language questions or concise search terms both work. "
+            "Results include ranked text chunks, source references and document IDs. "
+            "Use biel_get_document with relevant IDs when excerpts need more context, "
+            "then write your own answer and cite the sources. No automatic fallback to "
+            "biel_ai; ask the user before requesting a Biel.ai-generated answer."
+        ),
+        "annotations": {"readOnlyHint": True},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Documentation question or search terms"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5, "description": "Maximum source chunks returned"},
+                "api_key": {"type": "string", "description": "API key with search scope for a private project (optional)"},
+                "domain": {"type": "string", "description": "Domain URL if Allowed domains is enabled (optional)"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "biel_get_document",
         "description": (
-            "Retrieve complete indexed document text using a document_id from biel_ai search. "
+            "Retrieve complete indexed document text using a document_id from biel_search. "
             "Reads indexed web pages, uploaded files, repository files and OpenAPI content "
             "without visiting the source site or generating an answer. Large documents return "
             "a next_cursor: repeat with that cursor and the same document_id and limit until "
@@ -425,7 +426,7 @@ def create_success_response(text: str) -> Dict[str, Any]:
 
 def validate_biel_request(arguments: Dict[str, Any]) -> Optional[str]:
     """Validate Biel.ai request arguments. Returns error message if invalid, None if valid."""
-    mode = arguments.get("mode", "search")
+    mode = arguments.get("mode", "answer")
     if mode != "get" and (not isinstance(arguments.get("message"), str) or not arguments["message"].strip()):
         return "Message cannot be empty"
 
@@ -532,10 +533,26 @@ def format_document_response(data: Dict[str, Any]) -> str:
 async def query_biel_document(arguments: Dict[str, Any], defaults: Dict[str, str] = None):
     if not isinstance(arguments, dict):
         return create_error_response("Tool arguments must be an object."), None, None
-    return await query_biel_ai({**arguments, "mode": "get"}, defaults)
+    return await query_biel_api({**arguments, "mode": "get"}, defaults)
 
 
 async def query_biel_ai(
+    arguments: Dict[str, Any], defaults: Dict[str, str] = None
+) -> tuple[Dict[str, Any], Optional[str], Optional[str]]:
+    if not isinstance(arguments, dict):
+        return create_error_response("Tool arguments must be an object."), None, None
+    return await query_biel_api({**arguments, "mode": "answer"}, defaults)
+
+
+async def query_biel_search(
+    arguments: Dict[str, Any], defaults: Dict[str, str] = None
+) -> tuple[Dict[str, Any], Optional[str], Optional[str]]:
+    if not isinstance(arguments, dict):
+        return create_error_response("Tool arguments must be an object."), None, None
+    return await query_biel_api({**arguments, "message": arguments.get("query"), "mode": "search"}, defaults)
+
+
+async def query_biel_api(
     arguments: Dict[str, Any], defaults: Dict[str, str] = None
 ) -> tuple[Dict[str, Any], Optional[str], Optional[str]]:
     """
@@ -545,7 +562,7 @@ async def query_biel_ai(
     if not isinstance(arguments, dict):
         return create_error_response("Tool arguments must be an object."), None, None
     arguments = dict(arguments)
-    mode = arguments.get("mode", "search")
+    mode = arguments.get("mode", "answer")
     if mode not in ("answer", "search", "get"):
         return create_error_response("Mode must be 'answer' or 'search'"), None, None
     session_project = (defaults or {}).get("project_slug")
@@ -666,7 +683,7 @@ async def query_biel_ai(
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             if mode == "search":
                 response = await client.get(
-                    full_url, params={"q": message, "url": domain or base_url, "content_scope": "all"}, headers=headers
+                    full_url, params={"q": message, "url": domain or base_url, "source_types": "all", "search_type": "hybrid"}, headers=headers
                 )
             elif mode == "get":
                 response = await client.get(full_url, params={
@@ -796,8 +813,6 @@ async def handle_mcp_request(data: Dict[str, Any], defaults: Dict[str, str] = No
             arguments = params.get("arguments", {})
 
             if tool_name == "biel_ai":
-                if isinstance(arguments, dict) and arguments.get("mode") == "get":
-                    return create_mcp_response(msg_id, create_error_response("Use biel_get_document to retrieve documents."))
                 result, new_chat_uuid, new_restore_token = await query_biel_ai(
                     arguments, defaults
                 )
@@ -814,6 +829,9 @@ async def handle_mcp_request(data: Dict[str, Any], defaults: Dict[str, str] = No
                     )
                     logger.debug("MCP conversation stored", extra={"event": "mcp.conversation_stored"})
 
+                return create_mcp_response(msg_id, result)
+            elif tool_name == "biel_search":
+                result, _, _ = await query_biel_search(arguments, defaults)
                 return create_mcp_response(msg_id, result)
             elif tool_name == "biel_get_document":
                 result, _, _ = await query_biel_document(arguments, defaults)

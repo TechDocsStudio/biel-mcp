@@ -49,7 +49,8 @@ class DocumentFormatTest(TestCase):
         self.assertIn("next_cursor", tool["description"])
         self.assertIn("explicitly requests", TOOLS[0]["description"])
         self.assertIn("ask the user first", TOOLS[0]["description"])
-        self.assertIn("do not fall back to answer automatically", TOOLS[0]["description"])
+        self.assertIn("Do not fall back to biel_ai automatically", TOOLS[0]["description"])
+        self.assertIn("biel_search", tool["description"])
 
     def test_search_exposes_document_id_for_get(self):
         text = format_search_response(

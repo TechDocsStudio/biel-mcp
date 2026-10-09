@@ -231,10 +231,16 @@ TOOLS = [
     {
         "name": "biel_ai",
         "description": (
-            "Find documentation about code, SDKs and APIs. Choose mode='search' "
-            "for ranked source snippets and URLs without answer generation; use "
-            "concise keywords and write your own answer from the sources. Choose "
-            "mode='answer' for a generated Biel.ai answer with conversational context."
+            "Search this Biel.ai project's indexed product documentation and knowledge "
+            "base, or get an answer grounded in those sources. Use for product setup, "
+            "configuration, API and SDK usage, integrations, troubleshooting, and "
+            "locating supporting documentation. Content can include product guides, "
+            "API references, help articles, uploaded documents, repository content "
+            "and OpenAPI sources. Choose mode='search' to retrieve ranked text chunks "
+            "and source references without Biel.ai answer generation; use concise "
+            "keywords and write your own answer from the retrieved sources. Choose "
+            "mode='answer' for a generated Biel.ai response with conversational context. "
+            "Results are limited to this project's indexed content."
         ),
         "inputSchema": {
             "type": "object",
@@ -248,7 +254,7 @@ TOOLS = [
                     "enum": ["answer", "search"],
                     "default": "answer",
                     "description": (
-                        "search: retrieve source snippets and URLs without generating an answer. "
+                        "search: retrieve source text chunks and references without generating an answer. "
                         "answer: generate a response using Biel.ai; can take longer. "
                         "Private projects require a key with the corresponding search or chats_create scope."
                     )
@@ -258,7 +264,7 @@ TOOLS = [
                     "minimum": 1,
                     "maximum": 20,
                     "default": 5,
-                    "description": "Maximum snippets returned in search mode; ignored in answer mode"
+                    "description": "Maximum source chunks returned in search mode; ignored in answer mode"
                 },
                 "api_key": {
                     "type": "string",

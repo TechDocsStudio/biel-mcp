@@ -20,6 +20,7 @@ from biel_mcp.server import (
     header_safe,
     normalize_base_url,
     query_biel_ai,
+    query_biel_search,
     resolve_base_url,
     validate_biel_request,
 )
@@ -64,10 +65,15 @@ class RecordingAsyncClient:
 
 
 class ConfigurationTest(TestCase):
-    def test_tool_advertises_answer_and_search_modes(self):
+    def test_tools_separate_generated_answers_search_and_document_reads(self):
+        self.assertEqual([tool["name"] for tool in TOOLS], ["biel_ai", "biel_search", "biel_get_document"])
         properties = TOOLS[0]["inputSchema"]["properties"]
-        self.assertEqual(properties["mode"]["enum"], ["answer", "search"])
-        self.assertEqual(properties["mode"]["default"], "search")
+        self.assertNotIn("mode", properties)
+        self.assertNotIn("limit", properties)
+        self.assertEqual(TOOLS[0]["inputSchema"]["required"], ["message"])
+        self.assertEqual(TOOLS[1]["inputSchema"]["required"], ["query"])
+        self.assertIn("hybrid", TOOLS[1]["description"])
+        self.assertIn("biel_get_document", TOOLS[1]["description"])
 
     def test_search_format_bounds_results_and_reports_empty_matches(self):
         data = {"results": [
@@ -460,7 +466,7 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/call",
-            "params": {"name": "biel_ai", "arguments": {"message": "hi", "mode": "answer"}},
+            "params": {"name": "biel_ai", "arguments": {"message": "hi"}},
         }
 
     async def test_the_client_named_at_initialize_labels_a_later_tool_call(self):
@@ -527,13 +533,14 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
             session_id = initialized.headers["MCP-Session-Id"]
             await self.post_mcp(client, self.call_body(), session_id)
             search = self.call_body()
-            search["params"]["arguments"]["mode"] = "search"
+            search["params"] = {"name": "biel_search", "arguments": {"query": "SDK setup"}}
             response = await self.post_mcp(client, search, session_id)
             request = RecordingAsyncClient.calls[-1]
             self.assertTrue(request["url"].endswith("/search/"))
             self.assertNotIn("X-Chat-Restore-Token", request["headers"])
             self.assertNotIn("chat_uuid", request["params"])
-            self.assertEqual(request["params"]["q"], search["params"]["arguments"]["message"])
+            self.assertEqual(request["params"]["q"], "SDK setup")
+            self.assertEqual(request["params"]["search_type"], "hybrid")
             self.assertFalse(response.json()["result"]["isError"])
             self.assertIn("Install the SDK", response.json()["result"]["content"][0]["text"])
             await self.post_mcp(client, self.call_body(), session_id)
@@ -592,20 +599,30 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
 
 
 class SearchModeTest(IsolatedAsyncioTestCase):
-    async def test_omitting_mode_searches_without_generating_an_answer(self):
+    async def test_existing_biel_ai_arguments_still_generate_an_answer(self):
         RecordingAsyncClient.calls = []
         with patch("biel_mcp.server.httpx.AsyncClient", RecordingAsyncClient):
             result, chat, token = await query_biel_ai({"message": "SDK auth"}, {"project_slug": "docs"})
         self.assertFalse(result["isError"])
-        self.assertIsNone(chat)
-        self.assertIsNone(token)
-        self.assertTrue(RecordingAsyncClient.calls[0]["url"].endswith("/search/"))
+        self.assertEqual(chat, "chat-1")
+        self.assertEqual(token, "restore-1")
+        self.assertIn("Biel.ai responds", result["content"][0]["text"])
+        self.assertIn("json", RecordingAsyncClient.calls[0])
+
+    async def test_tool_arguments_cannot_switch_biel_ai_to_retrieval(self):
+        for mode in ("search", "get"):
+            RecordingAsyncClient.calls = []
+            with self.subTest(mode=mode), patch("biel_mcp.server.httpx.AsyncClient", RecordingAsyncClient):
+                result, chat, _ = await query_biel_ai({"message": "SDK auth", "mode": mode}, {"project_slug": "docs"})
+            self.assertFalse(result["isError"])
+            self.assertEqual(chat, "chat-1")
+            self.assertIn("json", RecordingAsyncClient.calls[0])
 
     async def test_search_uses_get_with_project_credentials_without_chat_capabilities(self):
         RecordingAsyncClient.calls = []
         with patch("biel_mcp.server.httpx.AsyncClient", RecordingAsyncClient):
-            result, chat, token = await query_biel_ai(
-                {"message": "SDK auth", "mode": "search", "limit": 2},
+            result, chat, token = await query_biel_search(
+                {"query": "SDK auth", "mode": "answer", "limit": 2},
                 {"project_slug": "docs", "api_key": "private-key", "domain": "https://docs.example.com", "chat_uuid": "old-chat"},
             )
         self.assertFalse(result["isError"])
@@ -613,16 +630,16 @@ class SearchModeTest(IsolatedAsyncioTestCase):
         self.assertIsNone(token)
         request = RecordingAsyncClient.calls[0]
         self.assertTrue(request["url"].endswith("/projects/docs/search/"))
-        self.assertEqual(request["params"], {"q": "SDK auth", "url": "https://docs.example.com", "content_scope": "all"})
+        self.assertEqual(request["params"], {"q": "SDK auth", "url": "https://docs.example.com", "source_types": "all", "search_type": "hybrid"})
         self.assertEqual(request["headers"]["Authorization"], "Api-Key private-key")
         self.assertEqual(request["headers"]["X-Biel-Source"], "mcp")
         self.assertNotIn("X-Chat-Restore-Token", request["headers"])
 
-    async def test_invalid_mode_or_search_limit_fails_before_any_api_call(self):
+    async def test_invalid_query_or_search_limit_fails_before_any_api_call(self):
         RecordingAsyncClient.calls = []
-        for options in ({"mode": "unknown"}, {"mode": None}, {"mode": "search", "limit": 0}, {"mode": "search", "limit": 21}, {"mode": "search", "limit": True}, {"mode": "search", "limit": "5"}):
+        for options in ({"query": ""}, {"query": None}, {"query": 1}, {"limit": 0}, {"limit": 21}, {"limit": True}, {"limit": "5"}):
             with self.subTest(options=options), patch("biel_mcp.server.httpx.AsyncClient", RecordingAsyncClient):
-                result, _, _ = await query_biel_ai({"message": "setup", "project_slug": "docs", **options})
+                result, _, _ = await query_biel_search({"query": "setup", "project_slug": "docs", **options})
             self.assertTrue(result["isError"])
         self.assertEqual(RecordingAsyncClient.calls, [])
 
@@ -631,7 +648,9 @@ class UpstreamFailuresTest(IsolatedAsyncioTestCase):
     async def query(self, transport, mode="answer"):
         client = RealAsyncClient(transport=transport)
         with patch("biel_mcp.server.httpx.AsyncClient", return_value=client):
-            return await query_biel_ai({"message": "private question", "project_slug": "docs", "mode": mode})
+            if mode == "search":
+                return await query_biel_search({"query": "private question", "project_slug": "docs"})
+            return await query_biel_ai({"message": "private question", "project_slug": "docs"})
 
     async def test_search_http_errors_and_timeouts_are_marked_as_tool_failures(self):
         for code in (403, 404, 429, 500):

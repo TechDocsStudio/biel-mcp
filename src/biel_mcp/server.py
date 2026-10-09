@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 from sse_starlette import EventSourceResponse
 
 # Constants
-SERVER_VERSION = "2.1.0"
+SERVER_VERSION = "2.1.1"
 SERVER_NAME = "biel-ai-mcp"
 DEFAULT_PORT = 7832
 DEFAULT_BASE_URL = "https://app.biel.ai"
@@ -32,14 +32,15 @@ BIEL_SEARCH_PATH_TEMPLATE = "/api/v2/projects/{project_slug}/search/"
 BIEL_DOCUMENT_PATH_TEMPLATE = "/api/v2/projects/{project_slug}/documents/{document_id}/"
 MCP_PROTOCOL_VERSION = "2024-11-05"
 MCP_PROTOCOL_VERSION_V2 = "2025-11-25"
-API_READ_TIMEOUT_SECONDS = float(os.environ.get("BIEL_MCP_READ_TIMEOUT_SECONDS", "60"))
+API_READ_TIMEOUT_SECONDS = float(os.environ.get("BIEL_MCP_READ_TIMEOUT_SECONDS", "600"))
 if not math.isfinite(API_READ_TIMEOUT_SECONDS) or API_READ_TIMEOUT_SECONDS <= 0:
     raise ValueError("BIEL_MCP_READ_TIMEOUT_SECONDS must be a positive finite number")
 REQUEST_TIMEOUT = httpx.Timeout(
     API_READ_TIMEOUT_SECONDS, connect=5.0, write=10.0, pool=5.0
 )
 KEEPALIVE_INTERVAL = 30
-SESSION_TIMEOUT = 300  # 5 minutes
+# Keep conversation credentials available throughout an upstream wait.
+SESSION_TIMEOUT = math.ceil(API_READ_TIMEOUT_SECONDS) + 300
 
 # Error codes
 JSON_PARSE_ERROR = -32700

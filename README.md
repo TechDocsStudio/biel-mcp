@@ -57,13 +57,23 @@ Can you check in biel_ai what the auth headers are for the /users endpoint?
 
 ## Choose generated answers or search
 
-The `biel_ai` tool accepts `mode: "answer" | "search"`. Omit it to keep generated answers and conversation context. Use `search` with concise terms to retrieve ranked content from indexed web pages, uploaded files, repositories and OpenAPI sources without waiting for Biel.ai to generate an answer. The calling model can then compose an answer from those sources.
+The `biel_ai` tool accepts `mode: "answer" | "search"` and defaults to `search`. Use concise terms to retrieve ranked content from indexed web pages, uploaded files, repositories and OpenAPI sources without waiting for Biel.ai to generate an answer. The calling model can then compose an answer from those sources. Select `mode: "answer"` explicitly when the user wants Biel.ai to generate the response; that mode supports conversation context.
 
 ```json
 {"message": "SDK authentication", "mode": "search"}
 ```
 
-Search requests the API's `content_scope=all`. Results include chunk text, source type and any page/sheet reference; non-URL documents are cited by title and location. The `limit` argument controls how many chunks are returned (default 5, maximum 20). Search does not create or continue a chat. Private projects require an API key with the `search` scope; generated answers use `chats_create`. Both paths retain the API's project access, domain and quota checks.
+Search requests the API's `content_scope=all`. Results include chunk text, source type, a `document_id`, and any page/sheet reference; non-URL documents are cited by title and location. The `limit` argument controls how many chunks are returned (default 5, maximum 20).
+
+Use `biel_get_document` with a search result's `document_id` to read the complete indexed document without visiting its source site:
+
+```json
+{"document_id": "DOCUMENT_ID_FROM_SEARCH", "limit": 20}
+```
+
+Get returns full indexed chunks in reading order, with PDF page and spreadsheet sheet references. Large documents include a `next_cursor`; repeat the call with that cursor and the same `document_id` and `limit` until it is absent. This returns the indexed text, not the original binary upload or live page HTML. References belong to the project's active index generation: search again after a recrawl invalidates a reference. Older repository and OpenAPI sources require a recrawl to populate parent-document identity before get is available.
+
+Search and get do not create or continue a chat. Private projects require an API key with the `search` scope; generated answers use `chats_create`. All operations retain the API's project access, domain and quota checks. The default workflow is **search → get → answer using the retrieved text**. If the calling agent wants Biel.ai to generate an answer, it should ask the user first unless the user has already explicitly requested that. Retrieval failures never automatically switch to generated answers.
 
 ## Self-hosting (Optional)
 

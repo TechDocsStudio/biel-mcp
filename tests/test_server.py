@@ -16,6 +16,7 @@ from biel_mcp.server import (
     app,
     extract_client_info,
     format_biel_response,
+    format_search_response,
     header_safe,
     normalize_base_url,
     query_biel_ai,
@@ -54,8 +55,43 @@ class RecordingAsyncClient:
             },
         )
 
+    async def get(self, url, params=None, headers=None):
+        type(self).calls.append({"url": url, "params": params, "headers": headers})
+        return SimpleNamespace(
+            status_code=200, headers={},
+            json=lambda: {"results": [{"title": "Setup", "url": "https://docs.example.com/setup", "fragment": "Install the SDK."}]},
+        )
+
 
 class ConfigurationTest(TestCase):
+    def test_tool_advertises_answer_and_search_modes(self):
+        properties = TOOLS[0]["inputSchema"]["properties"]
+        self.assertEqual(properties["mode"]["enum"], ["answer", "search"])
+        self.assertEqual(properties["mode"]["default"], "answer")
+
+    def test_search_format_bounds_results_and_reports_empty_matches(self):
+        data = {"results": [
+            {"title": f"Result {n}", "url": f"https://example.com/{n}", "fragment": f"Snippet {n}"}
+            for n in range(6)
+        ]}
+        text = format_search_response(data, 2)
+        self.assertIn("showing 2 of 6", text)
+        self.assertIn("Snippet 1", text)
+        self.assertIn("https://example.com/1", text)
+        self.assertNotIn("Snippet 2", text)
+        self.assertIn("No matching documentation", format_search_response({"results": []}))
+
+    def test_document_search_returns_full_text_and_citable_location(self):
+        text = format_search_response({"results": [{
+            "title": "manual.pdf", "source_type": "file", "url": None,
+            "page": 3, "sheet": "Revenue", "fragment": "preview",
+            "content": "The full instructions used to answer the question.",
+        }]})
+        self.assertIn("manual.pdf (file)", text)
+        self.assertIn("page 3", text)
+        self.assertIn("sheet Revenue", text)
+        self.assertIn("The full instructions", text)
+        self.assertNotIn("URL:", text)
     def test_standalone_logs_preserve_safe_upstream_diagnostics(self):
         record = logging.makeLogRecord({
             "msg": "MCP upstream request completed", "levelname": "ERROR",
@@ -484,6 +520,25 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
             second_relay["headers"]["X-Chat-Restore-Token"], "restore-1"
         )
 
+    async def test_search_between_answers_preserves_the_conversation(self):
+        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            initialized = await self.post_mcp(client, self.initialize_body())
+            session_id = initialized.headers["MCP-Session-Id"]
+            await self.post_mcp(client, self.call_body(), session_id)
+            search = self.call_body()
+            search["params"]["arguments"]["mode"] = "search"
+            response = await self.post_mcp(client, search, session_id)
+            request = RecordingAsyncClient.calls[-1]
+            self.assertTrue(request["url"].endswith("/search/"))
+            self.assertNotIn("X-Chat-Restore-Token", request["headers"])
+            self.assertNotIn("chat_uuid", request["params"])
+            self.assertEqual(request["params"]["q"], search["params"]["arguments"]["message"])
+            self.assertFalse(response.json()["result"]["isError"])
+            self.assertIn("Install the SDK", response.json()["result"]["content"][0]["text"])
+            await self.post_mcp(client, self.call_body(), session_id)
+        self.assertEqual(RecordingAsyncClient.calls[-1]["json"]["chat_uuid"], "chat-1")
+        self.assertEqual(RecordingAsyncClient.calls[-1]["headers"]["X-Chat-Restore-Token"], "restore-1")
+
     async def test_initialized_notification_is_accepted_without_a_response_body(self):
         async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             initialized = await self.post_mcp(client, self.initialize_body())
@@ -535,11 +590,61 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
         self.assertEqual(RecordingAsyncClient.calls, [])
 
 
+class SearchModeTest(IsolatedAsyncioTestCase):
+    async def test_search_uses_get_with_project_credentials_without_chat_capabilities(self):
+        RecordingAsyncClient.calls = []
+        with patch("biel_mcp.server.httpx.AsyncClient", RecordingAsyncClient):
+            result, chat, token = await query_biel_ai(
+                {"message": "SDK auth", "mode": "search", "limit": 2},
+                {"project_slug": "docs", "api_key": "private-key", "domain": "https://docs.example.com", "chat_uuid": "old-chat"},
+            )
+        self.assertFalse(result["isError"])
+        self.assertIsNone(chat)
+        self.assertIsNone(token)
+        request = RecordingAsyncClient.calls[0]
+        self.assertTrue(request["url"].endswith("/projects/docs/search/"))
+        self.assertEqual(request["params"], {"q": "SDK auth", "url": "https://docs.example.com", "content_scope": "all"})
+        self.assertEqual(request["headers"]["Authorization"], "Api-Key private-key")
+        self.assertEqual(request["headers"]["X-Biel-Source"], "mcp")
+        self.assertNotIn("X-Chat-Restore-Token", request["headers"])
+
+    async def test_invalid_mode_or_search_limit_fails_before_any_api_call(self):
+        RecordingAsyncClient.calls = []
+        for options in ({"mode": "unknown"}, {"mode": None}, {"mode": "search", "limit": 0}, {"mode": "search", "limit": 21}, {"mode": "search", "limit": True}, {"mode": "search", "limit": "5"}):
+            with self.subTest(options=options), patch("biel_mcp.server.httpx.AsyncClient", RecordingAsyncClient):
+                result, _, _ = await query_biel_ai({"message": "setup", "project_slug": "docs", **options})
+            self.assertTrue(result["isError"])
+        self.assertEqual(RecordingAsyncClient.calls, [])
+
+
 class UpstreamFailuresTest(IsolatedAsyncioTestCase):
-    async def query(self, transport):
+    async def query(self, transport, mode="answer"):
         client = RealAsyncClient(transport=transport)
         with patch("biel_mcp.server.httpx.AsyncClient", return_value=client):
-            return await query_biel_ai({"message": "private question", "project_slug": "docs"})
+            return await query_biel_ai({"message": "private question", "project_slug": "docs", "mode": mode})
+
+    async def test_search_http_errors_and_timeouts_are_marked_as_tool_failures(self):
+        for code in (403, 404, 429, 500):
+            with self.subTest(code=code):
+                result, _, _ = await self.query(
+                    httpx.MockTransport(lambda request, status=code: httpx.Response(status, text="private-detail")),
+                    mode="search",
+                )
+                self.assertTrue(result["isError"])
+                self.assertNotIn("private-detail", str(result))
+        with self.assertLogs("biel-mcp", level="ERROR") as captured:
+            result, _, _ = await self.query(httpx.MockTransport(raise_read_timeout), mode="search")
+        self.assertTrue(result["isError"])
+        self.assertEqual(captured.records[-1].mode, "search")
+        self.assertEqual(captured.records[-1].error_kind, "timeout")
+
+    async def test_malformed_search_payload_is_not_presented_as_a_successful_answer(self):
+        result, _, _ = await self.query(
+            httpx.MockTransport(lambda request: httpx.Response(200, json={"ai_message": {"message": "wrong-contract"}})),
+            mode="search",
+        )
+        self.assertTrue(result["isError"])
+        self.assertNotIn("wrong-contract", str(result))
 
     async def test_http_errors_are_tool_errors_and_do_not_echo_backend_payloads(self):
         for status in (403, 404, 429, 500):
@@ -559,11 +664,13 @@ class UpstreamFailuresTest(IsolatedAsyncioTestCase):
                 self.assertGreaterEqual(record.duration_ms, 0)
 
     async def test_read_timeout_is_reported_separately_from_http_rejections(self):
-        def timeout(request):
-            raise httpx.ReadTimeout("secret-backend-payload")
         with self.assertLogs("biel-mcp", level="ERROR") as captured:
-            result, _, _ = await self.query(httpx.MockTransport(timeout))
+            result, _, _ = await self.query(httpx.MockTransport(raise_read_timeout))
         self.assertTrue(result["isError"])
         self.assertEqual(captured.records[-1].error_kind, "timeout")
         self.assertIsNone(captured.records[-1].upstream_status)
         self.assertNotIn("secret-backend-payload", str(result))
+
+
+def raise_read_timeout(request):
+    raise httpx.ReadTimeout("secret-backend-payload")

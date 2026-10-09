@@ -28,6 +28,7 @@ SERVER_NAME = "biel-ai-mcp"
 DEFAULT_PORT = 7832
 DEFAULT_BASE_URL = "https://app.biel.ai"
 BIEL_API_PATH_TEMPLATE = "/api/v2/projects/{project_slug}/chats/"
+BIEL_SEARCH_PATH_TEMPLATE = "/api/v2/projects/{project_slug}/search/"
 MCP_PROTOCOL_VERSION = "2024-11-05"
 MCP_PROTOCOL_VERSION_V2 = "2025-11-25"
 API_READ_TIMEOUT_SECONDS = float(os.environ.get("BIEL_MCP_READ_TIMEOUT_SECONDS", "60"))
@@ -229,13 +230,35 @@ class SessionManager:
 TOOLS = [
     {
         "name": "biel_ai",
-        "description": "Query Biel.ai's specialized AI about code, SDKs and documentation",
+        "description": (
+            "Find documentation about code, SDKs and APIs. Choose mode='search' "
+            "for ranked source snippets and URLs without answer generation; use "
+            "concise keywords and write your own answer from the sources. Choose "
+            "mode='answer' for a generated Biel.ai answer with conversational context."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "message": {
                     "type": "string",
-                    "description": "Your question about code, SDK or documentation"
+                    "description": "Question for answer mode, or concise search terms for search mode"
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["answer", "search"],
+                    "default": "answer",
+                    "description": (
+                        "search: retrieve source snippets and URLs without generating an answer. "
+                        "answer: generate a response using Biel.ai; can take longer. "
+                        "Private projects require a key with the corresponding search or chats_create scope."
+                    )
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "default": 5,
+                    "description": "Maximum snippets returned in search mode; ignored in answer mode"
                 },
                 "api_key": {
                     "type": "string",
@@ -372,6 +395,13 @@ def validate_biel_request(arguments: Dict[str, Any]) -> Optional[str]:
     if not isinstance(arguments.get("message"), str) or not arguments["message"].strip():
         return "Message cannot be empty"
 
+    if arguments.get("mode", "answer") not in ("answer", "search"):
+        return "Mode must be 'answer' or 'search'"
+    if arguments.get("mode") == "search":
+        limit = arguments.get("limit", 5)
+        if type(limit) is not int or not 1 <= limit <= 20:
+            return "Search limit must be an integer from 1 to 20"
+
     project_slug = arguments.get("project_slug", "")
     if not isinstance(project_slug, str):
         return "Project slug must be a string"
@@ -401,6 +431,32 @@ def format_biel_response(data: Dict[str, Any]) -> str:
     return "\n".join(response_parts)
 
 
+def format_search_response(data: Dict[str, Any], limit: int = 5) -> str:
+    """Return ranked source excerpts for the client to synthesize its own answer."""
+    results = data["results"]
+    if not isinstance(results, list):
+        raise ValueError("Invalid search response")
+    if not results:
+        return "No matching documentation found. Try different search terms."
+    parts = [
+        f"Documentation search results: showing {min(limit, len(results))} of {len(results)} "
+        "matches (source excerpts, no generated answer)."
+    ]
+    for number, result in enumerate(results[:limit], 1):
+        location = [result.get("page_title") or result.get("title") or "Untitled source"]
+        if result.get("page"):
+            location.append(f"page {result['page']}")
+        if result.get("sheet"):
+            location.append(f"sheet {result['sheet']}")
+        reference = f"URL: {result['url']}" if result.get("url") else "Reference: " + ", ".join(location)
+        parts.append(
+            f"{number}. {result.get('title', '')} ({result.get('source_type', 'page')})\n"
+            f"{reference}\n"
+            f"{result.get('content') or result.get('fragment', '')}"
+        )
+    return "\n\n".join(parts)
+
+
 async def query_biel_ai(
     arguments: Dict[str, Any], defaults: Dict[str, str] = None
 ) -> tuple[Dict[str, Any], Optional[str], Optional[str]]:
@@ -411,13 +467,16 @@ async def query_biel_ai(
     if not isinstance(arguments, dict):
         return create_error_response("Tool arguments must be an object."), None, None
     arguments = dict(arguments)
+    mode = arguments.get("mode", "answer")
+    if mode not in ("answer", "search"):
+        return create_error_response("Mode must be 'answer' or 'search'"), None, None
     session_project = (defaults or {}).get("project_slug")
     if session_project and arguments.get("project_slug") not in (None, "", session_project):
         return create_error_response("The project is fixed by this connection."), None, None
     requested_chat = arguments.get("chat_uuid")
     session_chat = (defaults or {}).get("chat_uuid")
     session_token = (defaults or {}).get("restore_token")
-    if requested_chat and (requested_chat != session_chat or not session_token):
+    if mode == "answer" and requested_chat and (requested_chat != session_chat or not session_token):
         logger.warning(
             "MCP continuation unavailable",
             extra={"event": "mcp.continuation_rejected", "error_kind": "session_mismatch"},
@@ -426,7 +485,7 @@ async def query_biel_ai(
             "This conversation cannot be resumed by this connection. "
             "Reconnect to start a new conversation; do not supply a chat UUID."
         ), None, None
-    if session_chat and not session_token:
+    if mode == "answer" and session_chat and not session_token:
         logger.warning(
             "MCP continuation unavailable",
             extra={"event": "mcp.continuation_rejected", "error_kind": "missing_capability"},
@@ -450,7 +509,8 @@ async def query_biel_ai(
 
         # A continuation requires the UUID and its matching bearer capability.
         if (
-            not arguments.get("chat_uuid")
+            mode == "answer"
+            and not arguments.get("chat_uuid")
             and defaults.get("chat_uuid")
             and defaults.get("restore_token")
         ):
@@ -495,7 +555,8 @@ async def query_biel_ai(
     # Restore capabilities are session state, never a caller-controlled tool
     # argument. Send one only for the exact UUID it was issued alongside.
     if (
-        restore_token
+        mode == "answer"
+        and restore_token
         and chat_uuid
         and chat_uuid == (defaults or {}).get("chat_uuid")
     ):
@@ -514,7 +575,8 @@ async def query_biel_ai(
     if user_agent:
         headers["X-MCP-Client-UA"] = user_agent
 
-    full_url = f"{base_url.rstrip('/')}{BIEL_API_PATH_TEMPLATE.format(project_slug=project_slug)}"
+    path_template = BIEL_SEARCH_PATH_TEMPLATE if mode == "search" else BIEL_API_PATH_TEMPLATE
+    full_url = f"{base_url.rstrip('/')}{path_template.format(project_slug=project_slug)}"
 
     started = time.monotonic()
     outcome = "upstream_error"
@@ -522,14 +584,24 @@ async def query_biel_ai(
     upstream_request_id = ""
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            response = await client.post(full_url, json=payload, headers=headers)
+            if mode == "search":
+                response = await client.get(
+                    full_url, params={"q": message, "url": domain or base_url, "content_scope": "all"}, headers=headers
+                )
+            else:
+                response = await client.post(full_url, json=payload, headers=headers)
             upstream_status = response.status_code
             upstream_request_id = header_safe(response.headers.get("x-request-id", ""))
 
             if response.status_code in (200, 201):
                 data = response.json()
-                formatted_response = format_biel_response(data)
+                formatted_response = (
+                    format_search_response(data, arguments.get("limit", 5))
+                    if mode == "search" else format_biel_response(data)
+                )
                 outcome = "success"
+                if mode == "search":
+                    return create_success_response(formatted_response), None, None
                 # Persist the pair together: the token is bound to this chat.
                 return (
                     create_success_response(formatted_response),
@@ -539,9 +611,15 @@ async def query_biel_ai(
             else:
                 error_msg = f"Biel.ai API returned HTTP {response.status_code}."
                 if response.status_code == 403:
-                    error_msg += " Check project access or reconnect to start a new conversation."
+                    error_msg += (
+                        " Check project search access and quota." if mode == "search"
+                        else " Check project access or reconnect to start a new conversation."
+                    )
                 elif response.status_code == 404:
-                    error_msg += " The project or conversation is unavailable; check the connection and reconnect."
+                    error_msg += (
+                        " The project is unavailable; check the connection." if mode == "search"
+                        else " The project or conversation is unavailable; check the connection and reconnect."
+                    )
                 return (
                     create_error_response(error_msg),
                     None,
@@ -568,7 +646,8 @@ async def query_biel_ai(
                 "duration_ms": int((time.monotonic() - started) * 1000),
                 "upstream_status": upstream_status,
                 "upstream_request_id": upstream_request_id,
-                "has_continuation": bool(chat_uuid),
+                "has_continuation": mode == "answer" and bool(chat_uuid),
+                "mode": mode,
                 "read_timeout_seconds": API_READ_TIMEOUT_SECONDS,
             },
         )
@@ -1194,7 +1273,7 @@ class MCPLogFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
         for field in ("event", "error_kind", "duration_ms", "upstream_status",
-                      "upstream_request_id", "has_continuation", "read_timeout_seconds"):
+                      "upstream_request_id", "has_continuation", "read_timeout_seconds", "mode"):
             if hasattr(record, field):
                 data[field] = getattr(record, field)
         return json.dumps(data)
@@ -1205,6 +1284,8 @@ def main() -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(MCPLogFormatter())
     logging.basicConfig(level=logging.INFO, handlers=[handler])
+    # HTTPX's info records include the complete search query string.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     # A self-hosted Biel instance is named here, by the operator, rather than
     # by whoever calls the server.
     app.state.api_base_url = normalize_base_url(

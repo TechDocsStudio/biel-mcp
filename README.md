@@ -55,6 +55,16 @@ When AI tools can read your product documentation, they become **significantly**
 Can you check in biel_ai what the auth headers are for the /users endpoint?
 ```
 
+## Choose generated answers or search
+
+The `biel_ai` tool accepts `mode: "answer" | "search"`. Omit it to keep generated answers and conversation context. Use `search` with concise terms to retrieve ranked content from indexed web pages, uploaded files, repositories and OpenAPI sources without waiting for Biel.ai to generate an answer. The calling model can then compose an answer from those sources.
+
+```json
+{"message": "SDK authentication", "mode": "search"}
+```
+
+Search requests the API's `content_scope=all`. Results include chunk text, source type and any page/sheet reference; non-URL documents are cited by title and location. The `limit` argument controls how many chunks are returned (default 5, maximum 20). Search does not create or continue a chat. Private projects require an API key with the `search` scope; generated answers use `chats_create`. Both paths retain the API's project access, domain and quota checks.
+
 ## Self-hosting (Optional)
 
 For advanced users who prefer to run their own MCP server instance:

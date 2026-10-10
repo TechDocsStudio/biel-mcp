@@ -1,11 +1,13 @@
 import json
 import logging
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
 
 import httpx
 from biel_mcp.server import (
+    API_READ_TIMEOUT_SECONDS,
     CLIENT_IDENTITY_MAX_LENGTH,
     MCP_PROTOCOL_VERSION_V2,
     REQUEST_TIMEOUT,
@@ -112,7 +114,7 @@ class ConfigurationTest(TestCase):
         self.assertNotIn("private", json.dumps(data))
 
     def test_read_timeout_has_headroom_without_lengthening_connection_waits(self):
-        self.assertEqual(REQUEST_TIMEOUT.read, 60)
+        self.assertEqual(REQUEST_TIMEOUT.read, 600)
         self.assertEqual(REQUEST_TIMEOUT.connect, 5)
         self.assertEqual(REQUEST_TIMEOUT.write, 10)
         self.assertEqual(REQUEST_TIMEOUT.pool, 5)
@@ -144,6 +146,25 @@ class ConfigurationTest(TestCase):
 
 
 class SessionManagerTest(IsolatedAsyncioTestCase):
+    async def test_slow_response_retains_credentials_for_the_next_question(self):
+        store = InMemorySessionStore()
+        sessions = SessionManager(store=store)
+        session_id = await sessions.create_session(project_slug="docs")
+        store.sessions[session_id]["last_active"] = datetime.now() - timedelta(
+            seconds=API_READ_TIMEOUT_SECONDS - 1
+        )
+
+        await sessions.cleanup_expired_sessions()
+        credentials = await sessions.record_chat_credentials(
+            session_id, "chat-1", "restore-1"
+        )
+        session = await sessions.get_session(session_id)
+
+        self.assertEqual(credentials, ("chat-1", "restore-1"))
+        self.assertIsNotNone(session)
+        self.assertEqual(session["chat_uuid"], "chat-1")
+        self.assertEqual(session["restore_token"], "restore-1")
+
     async def test_session_roundtrip(self):
         sessions = SessionManager()
         session_id = await sessions.create_session(project_slug="docs")

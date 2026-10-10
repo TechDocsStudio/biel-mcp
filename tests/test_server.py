@@ -18,6 +18,7 @@ from biel_mcp.server import (
     app,
     extract_client_info,
     format_biel_response,
+    chat_recovery_hint,
     format_search_response,
     header_safe,
     normalize_base_url,
@@ -741,3 +742,17 @@ class IncompleteAnswerTest(TestCase):
 
     def test_legacy_complete_answers_do_not_acquire_a_warning(self):
         self.assertNotIn("Incomplete answer", format_biel_response({"ai_message": {"message": "Complete"}}))
+
+
+class ChatRecoveryHintTest(TestCase):
+    def test_known_public_error_codes_have_a_useful_explanation(self):
+        for code in ("context_limit", "message_too_long", "output_limit", "generation_busy"):
+            response = httpx.Response(400 if code != "generation_busy" else 409, json={"code": code, "error": "secret-backend-payload"})
+            hint = chat_recovery_hint(response)
+            self.assertTrue(hint)
+            self.assertNotIn("secret-backend-payload", hint)
+
+    def test_unknown_and_malformed_errors_never_echo_payloads(self):
+        for body in ({"code": "unknown", "error": "private"}, ["private"], {"code": ["private"]}):
+            self.assertEqual(chat_recovery_hint(httpx.Response(400, json=body)), "")
+        self.assertEqual(chat_recovery_hint(httpx.Response(500, json={"code": "context_limit"})), "")

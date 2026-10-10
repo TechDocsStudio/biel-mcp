@@ -461,6 +461,21 @@ def validate_biel_request(arguments: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def chat_recovery_hint(response) -> str:
+    if response.status_code not in (400, 409):
+        return ""
+    try:
+        code = response.json().get("code")
+    except (ValueError, AttributeError):
+        return ""
+    return {
+        "context_limit": "This conversation exceeds the model's context limit. Start a new conversation with the relevant details; existing messages are preserved.",
+        "message_too_long": "The message is too long. Use at most 10,000 characters.",
+        "output_limit": "The model reached its output limit before producing an answer. Try a shorter request.",
+        "generation_busy": "This conversation is already generating a response. Wait before retrying.",
+    }.get(code, "") if isinstance(code, str) else ""
+
+
 def format_biel_response(data: Dict[str, Any]) -> str:
     """Format the response from Biel.ai API into a readable string."""
     ai_message = data.get("ai_message", {})
@@ -723,7 +738,7 @@ async def query_biel_api(
                     data.get("restore_token"),
                 )
             else:
-                error_msg = f"Biel.ai API returned HTTP {response.status_code}."
+                error_msg = chat_recovery_hint(response) or f"Biel.ai API returned HTTP {response.status_code}."
                 if response.status_code == 403:
                     error_msg += (
                         " Check project search access and quota." if mode != "answer"

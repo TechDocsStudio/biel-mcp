@@ -468,6 +468,13 @@ def format_biel_response(data: Dict[str, Any]) -> str:
 
     response_parts = [f"🤖 **Biel.ai responds:**\n\n{ai_response}"]
 
+    if ai_message.get("incomplete"):
+        reason = (ai_message.get("generation_metadata") or {}).get("stop_reason")
+        if reason in ("length", "max_tokens"):
+            response_parts.append("\n\n**Incomplete answer:** The output limit was reached after automatic continuation. Ask for a shorter answer or a specific section.")
+        else:
+            response_parts.append("\n\n**Incomplete answer:** Generation was interrupted. Ask again with the relevant details.")
+
     if sources:
         response_parts.append("\n\n📚 **Sources consulted:**")
         for source in sources:

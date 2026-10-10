@@ -703,3 +703,20 @@ class UpstreamFailuresTest(IsolatedAsyncioTestCase):
 
 def raise_read_timeout(request):
     raise httpx.ReadTimeout("secret-backend-payload")
+
+
+class IncompleteAnswerTest(TestCase):
+    def test_output_limit_is_visible_without_exposing_the_restore_token(self):
+        result = format_biel_response({"restore_token": "private-capability", "ai_message": {"message": "Partial", "incomplete": True, "generation_metadata": {"stop_reason": "max_tokens", "continuation_count": 2}}})
+        self.assertIn("Partial", result)
+        self.assertIn("Incomplete answer", result)
+        self.assertIn("output limit", result)
+        self.assertNotIn("private-capability", result)
+
+    def test_other_incomplete_reasons_are_not_reported_as_output_limits(self):
+        result = format_biel_response({"ai_message": {"message": "Partial", "incomplete": True, "generation_metadata": {"stop_reason": "context_limit"}}})
+        self.assertIn("Incomplete answer", result)
+        self.assertNotIn("output limit", result)
+
+    def test_legacy_complete_answers_do_not_acquire_a_warning(self):
+        self.assertNotIn("Incomplete answer", format_biel_response({"ai_message": {"message": "Complete"}}))

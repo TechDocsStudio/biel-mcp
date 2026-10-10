@@ -461,6 +461,22 @@ def validate_biel_request(arguments: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def chat_recovery_hint(response) -> str:
+    if response.status_code not in (400, 409, 503):
+        return ""
+    try:
+        code = response.json().get("code")
+    except (ValueError, AttributeError):
+        return ""
+    return {
+        "context_limit": "The current request still exceeds the model context after preparing the conversation. Ask about a smaller section; existing messages are preserved.",
+        "compaction_failed": "Earlier conversation could not be prepared right now. Retry in this chat; existing messages are preserved.",
+        "message_too_long": "The message is too long. Use at most 10,000 characters.",
+        "output_limit": "The model reached its output limit before producing an answer. Try a shorter request.",
+        "generation_busy": "This conversation is already generating a response. Wait before retrying.",
+    }.get(code, "") if isinstance(code, str) else ""
+
+
 def format_biel_response(data: Dict[str, Any]) -> str:
     """Format the response from Biel.ai API into a readable string."""
     ai_message = data.get("ai_message", {})
@@ -468,6 +484,13 @@ def format_biel_response(data: Dict[str, Any]) -> str:
     sources = ai_message.get("sources", [])
 
     response_parts = [f"🤖 **Biel.ai responds:**\n\n{ai_response}"]
+
+    if ai_message.get("incomplete"):
+        reason = (ai_message.get("generation_metadata") or {}).get("stop_reason")
+        if reason in ("length", "max_tokens"):
+            response_parts.append("\n\n**Incomplete answer:** The output limit was reached after automatic continuation. Ask for a shorter answer or a specific section.")
+        else:
+            response_parts.append("\n\n**Incomplete answer:** Generation was interrupted. Ask again with the relevant details.")
 
     if sources:
         response_parts.append("\n\n📚 **Sources consulted:**")
@@ -716,7 +739,7 @@ async def query_biel_api(
                     data.get("restore_token"),
                 )
             else:
-                error_msg = f"Biel.ai API returned HTTP {response.status_code}."
+                error_msg = chat_recovery_hint(response) or f"Biel.ai API returned HTTP {response.status_code}."
                 if response.status_code == 403:
                     error_msg += (
                         " Check project search access and quota." if mode != "answer"

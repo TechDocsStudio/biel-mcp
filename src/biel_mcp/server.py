@@ -462,14 +462,15 @@ def validate_biel_request(arguments: Dict[str, Any]) -> Optional[str]:
 
 
 def chat_recovery_hint(response) -> str:
-    if response.status_code not in (400, 409):
+    if response.status_code not in (400, 409, 503):
         return ""
     try:
         code = response.json().get("code")
     except (ValueError, AttributeError):
         return ""
     return {
-        "context_limit": "This conversation exceeds the model's context limit. Start a new conversation with the relevant details; existing messages are preserved.",
+        "context_limit": "The current request still exceeds the model context after preparing the conversation. Ask about a smaller section; existing messages are preserved.",
+        "compaction_failed": "Earlier conversation could not be prepared right now. Retry in this chat; existing messages are preserved.",
         "message_too_long": "The message is too long. Use at most 10,000 characters.",
         "output_limit": "The model reached its output limit before producing an answer. Try a shorter request.",
         "generation_busy": "This conversation is already generating a response. Wait before retrying.",

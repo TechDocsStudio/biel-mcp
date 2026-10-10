@@ -756,3 +756,15 @@ class ChatRecoveryHintTest(TestCase):
         for body in ({"code": "unknown", "error": "private"}, ["private"], {"code": ["private"]}):
             self.assertEqual(chat_recovery_hint(httpx.Response(400, json=body)), "")
         self.assertEqual(chat_recovery_hint(httpx.Response(500, json={"code": "context_limit"})), "")
+
+
+class CompactionRecoveryHintTest(TestCase):
+    def test_compaction_failure_retries_in_the_same_chat_without_echoing_provider_data(self):
+        hint = chat_recovery_hint(httpx.Response(503, json={"code":"compaction_failed", "error":"private-provider-payload"}))
+        self.assertIn("Retry in this chat", hint)
+        self.assertNotIn("private-provider-payload", hint)
+
+    def test_context_recovery_does_not_request_a_new_conversation(self):
+        hint = chat_recovery_hint(httpx.Response(400, json={"code":"context_limit"}))
+        self.assertIn("smaller section", hint)
+        self.assertNotIn("new conversation", hint)

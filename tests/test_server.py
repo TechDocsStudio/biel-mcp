@@ -1,11 +1,13 @@
 import json
 import logging
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
 
 import httpx
 from biel_mcp.server import (
+    API_READ_TIMEOUT_SECONDS,
     CLIENT_IDENTITY_MAX_LENGTH,
     MCP_PROTOCOL_VERSION_V2,
     REQUEST_TIMEOUT,
@@ -16,6 +18,7 @@ from biel_mcp.server import (
     app,
     extract_client_info,
     format_biel_response,
+    chat_recovery_hint,
     format_search_response,
     header_safe,
     normalize_base_url,
@@ -112,7 +115,7 @@ class ConfigurationTest(TestCase):
         self.assertNotIn("private", json.dumps(data))
 
     def test_read_timeout_has_headroom_without_lengthening_connection_waits(self):
-        self.assertEqual(REQUEST_TIMEOUT.read, 60)
+        self.assertEqual(REQUEST_TIMEOUT.read, 600)
         self.assertEqual(REQUEST_TIMEOUT.connect, 5)
         self.assertEqual(REQUEST_TIMEOUT.write, 10)
         self.assertEqual(REQUEST_TIMEOUT.pool, 5)
@@ -144,6 +147,25 @@ class ConfigurationTest(TestCase):
 
 
 class SessionManagerTest(IsolatedAsyncioTestCase):
+    async def test_slow_response_retains_credentials_for_the_next_question(self):
+        store = InMemorySessionStore()
+        sessions = SessionManager(store=store)
+        session_id = await sessions.create_session(project_slug="docs")
+        store.sessions[session_id]["last_active"] = datetime.now() - timedelta(
+            seconds=API_READ_TIMEOUT_SECONDS - 1
+        )
+
+        await sessions.cleanup_expired_sessions()
+        credentials = await sessions.record_chat_credentials(
+            session_id, "chat-1", "restore-1"
+        )
+        session = await sessions.get_session(session_id)
+
+        self.assertEqual(credentials, ("chat-1", "restore-1"))
+        self.assertIsNotNone(session)
+        self.assertEqual(session["chat_uuid"], "chat-1")
+        self.assertEqual(session["restore_token"], "restore-1")
+
     async def test_session_roundtrip(self):
         sessions = SessionManager()
         session_id = await sessions.create_session(project_slug="docs")
@@ -703,3 +725,46 @@ class UpstreamFailuresTest(IsolatedAsyncioTestCase):
 
 def raise_read_timeout(request):
     raise httpx.ReadTimeout("secret-backend-payload")
+
+
+class IncompleteAnswerTest(TestCase):
+    def test_output_limit_is_visible_without_exposing_the_restore_token(self):
+        result = format_biel_response({"restore_token": "private-capability", "ai_message": {"message": "Partial", "incomplete": True, "generation_metadata": {"stop_reason": "max_tokens", "continuation_count": 2}}})
+        self.assertIn("Partial", result)
+        self.assertIn("Incomplete answer", result)
+        self.assertIn("output limit", result)
+        self.assertNotIn("private-capability", result)
+
+    def test_other_incomplete_reasons_are_not_reported_as_output_limits(self):
+        result = format_biel_response({"ai_message": {"message": "Partial", "incomplete": True, "generation_metadata": {"stop_reason": "context_limit"}}})
+        self.assertIn("Incomplete answer", result)
+        self.assertNotIn("output limit", result)
+
+    def test_legacy_complete_answers_do_not_acquire_a_warning(self):
+        self.assertNotIn("Incomplete answer", format_biel_response({"ai_message": {"message": "Complete"}}))
+
+
+class ChatRecoveryHintTest(TestCase):
+    def test_known_public_error_codes_have_a_useful_explanation(self):
+        for code in ("context_limit", "message_too_long", "output_limit", "generation_busy"):
+            response = httpx.Response(400 if code != "generation_busy" else 409, json={"code": code, "error": "secret-backend-payload"})
+            hint = chat_recovery_hint(response)
+            self.assertTrue(hint)
+            self.assertNotIn("secret-backend-payload", hint)
+
+    def test_unknown_and_malformed_errors_never_echo_payloads(self):
+        for body in ({"code": "unknown", "error": "private"}, ["private"], {"code": ["private"]}):
+            self.assertEqual(chat_recovery_hint(httpx.Response(400, json=body)), "")
+        self.assertEqual(chat_recovery_hint(httpx.Response(500, json={"code": "context_limit"})), "")
+
+
+class CompactionRecoveryHintTest(TestCase):
+    def test_compaction_failure_retries_in_the_same_chat_without_echoing_provider_data(self):
+        hint = chat_recovery_hint(httpx.Response(503, json={"code":"compaction_failed", "error":"private-provider-payload"}))
+        self.assertIn("Retry in this chat", hint)
+        self.assertNotIn("private-provider-payload", hint)
+
+    def test_context_recovery_does_not_request_a_new_conversation(self):
+        hint = chat_recovery_hint(httpx.Response(400, json={"code":"context_limit"}))
+        self.assertIn("smaller section", hint)
+        self.assertNotIn("new conversation", hint)

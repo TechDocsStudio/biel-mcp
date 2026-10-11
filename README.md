@@ -40,13 +40,13 @@ When AI tools can read your product documentation, they become **significantly**
 }
 ```
 
-**Required:** `project_slug` and `domain`  
+**Required:** `project_slug` and `domain`
 **Optional:** `api_key` (only needed for private projects)
 
 ### 2. Add to your AI tool
 
 * **Cursor**: **Settings** → **Tools & Integrations* → **New MCP server**.
-* **Claude Desktop**: Edit `claude_desktop_config.json`  
+* **Claude Desktop**: Edit `claude_desktop_config.json`
 * **VS Code**: Install **MCP extension**.
 
 ### 3. Start asking questions
@@ -128,3 +128,20 @@ Conversation credentials remain in the MCP session. After HTTP 404 for an expire
 - **Issues**: [GitHub Issues](https://github.com/techdocsStudio/biel-mcp/issues)
 - **Contact**: [support@biel.ai](mailto:support@biel.ai)
 - **Custom Demo**: [Book a demo](https://biel.ai/contact)
+
+## HTTP transport configuration
+
+Local execution binds to `127.0.0.1` by default. For a remote deployment,
+set `BIEL_BIND_HOST=0.0.0.0` and `BIEL_ALLOWED_HOSTS` to the explicit hostnames
+clients use, including `localhost` if the container health check uses it.
+Wildcards and ports are not accepted in the host list.
+
+Browser clients must have their exact HTTP(S) origins listed in
+`BIEL_ALLOWED_ORIGINS`, separated by commas, for example
+`https://docs.example.com,https://portal.example.com`. An Origin header that
+is absent is allowed for ordinary MCP clients. An invalid, opaque or
+unlisted Origin is rejected with HTTP 403 before session initialization.
+The policy applies to Streamable HTTP, its aliases and legacy SSE.
+
+`BIEL_BASE_URL` and `BIEL_ALLOWED_BASE_URLS` configure the upstream Biel API
+destinations independently; they do not authorize browser origins.

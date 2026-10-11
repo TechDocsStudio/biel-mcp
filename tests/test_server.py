@@ -157,7 +157,7 @@ class ApplicationTest(IsolatedAsyncioTestCase):
     async def test_initialize_creates_a_session(self):
         app.state.session_manager = SessionManager()
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.post(
                 "/mcp/docs",
                 content=json.dumps(
@@ -189,7 +189,7 @@ class ApplicationTest(IsolatedAsyncioTestCase):
             ),
         ):
             async with httpx.AsyncClient(
-                transport=transport, base_url="http://test"
+                transport=transport, base_url="http://localhost"
             ) as client:
                 response = await client.post(
                     "/mcp/docs",
@@ -472,7 +472,7 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
     async def test_the_client_named_at_initialize_labels_a_later_tool_call(self):
         transport = httpx.ASGITransport(app=app)
         async with RealAsyncClient(
-            transport=transport, base_url="http://test"
+            transport=transport, base_url="http://localhost"
         ) as client:
             initialized = await self.post_mcp(
                 client, self.initialize_body(), user_agent="claude-code/2.1"
@@ -494,7 +494,7 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
     async def test_a_client_that_names_nobody_still_gets_its_query_relayed(self):
         transport = httpx.ASGITransport(app=app)
         async with RealAsyncClient(
-            transport=transport, base_url="http://test"
+            transport=transport, base_url="http://localhost"
         ) as client:
             body = self.initialize_body()
             del body["params"]["clientInfo"]
@@ -513,7 +513,7 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
         """The capability stays internal; old MCP configs need no changes."""
         transport = httpx.ASGITransport(app=app)
         async with RealAsyncClient(
-            transport=transport, base_url="http://test"
+            transport=transport, base_url="http://localhost"
         ) as client:
             initialized = await self.post_mcp(client, self.initialize_body())
             session_id = initialized.headers["MCP-Session-Id"]
@@ -528,7 +528,7 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
         )
 
     async def test_search_between_answers_preserves_the_conversation(self):
-        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
             initialized = await self.post_mcp(client, self.initialize_body())
             session_id = initialized.headers["MCP-Session-Id"]
             await self.post_mcp(client, self.call_body(), session_id)
@@ -548,7 +548,7 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
         self.assertEqual(RecordingAsyncClient.calls[-1]["headers"]["X-Chat-Restore-Token"], "restore-1")
 
     async def test_initialized_notification_is_accepted_without_a_response_body(self):
-        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
             initialized = await self.post_mcp(client, self.initialize_body())
             response = await self.post_mcp(client, {"jsonrpc": "2.0", "method": "notifications/initialized"}, initialized.headers["MCP-Session-Id"])
         self.assertEqual(response.status_code, 202)
@@ -557,7 +557,7 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
     async def test_expired_session_returns_404_without_creating_a_conversation(self):
         session = await app.state.session_manager.create_session(project_slug="abc123")
         await app.state.session_manager.delete_session(session)
-        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
             response = await self.post_mcp(client, self.call_body(), session)
         self.assertEqual(response.status_code, 404)
         self.assertEqual(RecordingAsyncClient.calls, [])
@@ -565,7 +565,7 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
 
     async def test_session_cannot_be_used_at_another_project_path(self):
         session = await app.state.session_manager.create_session(project_slug="different-project")
-        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
             for body in (self.initialize_body(), self.call_body()):
                 response = await self.post_mcp(client, body, session)
                 self.assertEqual(response.status_code, 404)
@@ -578,7 +578,7 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
 
     async def test_tool_cannot_override_connection_project(self):
         session = await app.state.session_manager.create_session(project_slug="abc123")
-        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
             body = self.call_body()
             body["params"]["arguments"]["project_slug"] = "another-project"
             response = await self.post_mcp(client, body, session)
@@ -588,7 +588,7 @@ class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
         self.assertFalse(stored.get("chat_uuid"))
 
     async def test_reconnected_client_cannot_continue_with_a_previous_uuid(self):
-        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
             initialized = await self.post_mcp(client, self.initialize_body())
             body = self.call_body()
             body["params"]["arguments"]["chat_uuid"] = "chat-1"

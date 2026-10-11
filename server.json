@@ -3,7 +3,7 @@
   "name": "ai.biel/biel-ai",
   "title": "Biel.ai",
   "description": "Query your product docs from AI tools. Source-cited answers from your indexed documentation.",
-  "version": "2.0.0",
+  "version": "2.2.0",
   "websiteUrl": "https://biel.ai",
   "repository": {
     "url": "https://github.com/TechDocsStudio/biel-mcp",

@@ -7,10 +7,13 @@ services:
       - "7832:7832"
     environment:
       - PYTHONUNBUFFERED=1
+      - BIEL_BIND_HOST=0.0.0.0
+      - BIEL_ALLOWED_HOSTS=${BIEL_ALLOWED_HOSTS:-localhost,127.0.0.1,::1}
+      - BIEL_ALLOWED_ORIGINS=${BIEL_ALLOWED_ORIGINS:-}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7832/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s 
+      start_period: 40s

@@ -40,13 +40,13 @@ When AI tools can read your product documentation, they become **significantly**
 }
 ```
 
-**Required:** `project_slug` and `domain`  
+**Required:** `project_slug` and `domain`
 **Optional:** `api_key` (only needed for private projects)
 
 ### 2. Add to your AI tool
 
 * **Cursor**: **Settings** → **Tools & Integrations* → **New MCP server**.
-* **Claude Desktop**: Edit `claude_desktop_config.json`  
+* **Claude Desktop**: Edit `claude_desktop_config.json`
 * **VS Code**: Install **MCP extension**.
 
 ### 3. Start asking questions

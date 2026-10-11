@@ -22,8 +22,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sse_starlette import EventSourceResponse
 
+from biel_mcp.transport_security import TransportPolicy, TransportSecurityMiddleware
+
 # Constants
-SERVER_VERSION = "2.1.1"
+SERVER_VERSION = "2.2.0"
 SERVER_NAME = "biel-ai-mcp"
 DEFAULT_PORT = 7832
 DEFAULT_BASE_URL = "https://app.biel.ai"
@@ -330,6 +332,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.state.transport_policy = TransportPolicy(
+    allowed_hosts=frozenset({"localhost", "127.0.0.1", "::1"}),
+)
+app.add_middleware(TransportSecurityMiddleware, state=app.state)
 
 # Sessions hang off app state so a host that scales past one process can swap
 # in a shared store before serving traffic. Standalone, the default is correct.
@@ -370,17 +376,7 @@ def create_error_response(message: str) -> Dict[str, Any]:
 
 
 def get_client_ip(request: Request) -> str:
-    """Extract real client IP considering common proxy headers"""
-    if "cf-connecting-ip" in request.headers:
-        return request.headers["cf-connecting-ip"].strip()
-
-    if "x-real-ip" in request.headers:
-        return request.headers["x-real-ip"].strip()
-
-    x_forwarded_for = request.headers.get("x-forwarded-for", "")
-    if x_forwarded_for:
-        return x_forwarded_for.split(",")[0].strip()
-
+    """Use the peer identity resolved by the ASGI server's trusted proxy policy."""
     return request.client.host if request.client else ""
 
 
@@ -1085,11 +1081,6 @@ async def streamable_http_endpoint_v2(
                 status_code=400
             )
 
-    # Validate Origin header to prevent DNS rebinding attacks
-    origin = request.headers.get("Origin")
-    if origin:
-        logger.debug("MCP Origin header supplied", extra={"event": "mcp.origin_received"})
-
     sessions: SessionManager = request.app.state.session_manager
 
     # Cleanup expired sessions periodically
@@ -1425,6 +1416,17 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, handlers=[handler])
     # HTTPX's info records include the complete search query string.
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    app.state.transport_policy = TransportPolicy(
+        allowed_hosts=frozenset(
+            value.strip() for value in os.environ.get(
+                "BIEL_ALLOWED_HOSTS", "localhost,127.0.0.1,::1"
+            ).split(",") if value.strip()
+        ),
+        allowed_origins=frozenset(
+            value.strip() for value in os.environ.get("BIEL_ALLOWED_ORIGINS", "").split(",")
+            if value.strip()
+        ),
+    )
     # A self-hosted Biel instance is named here, by the operator, rather than
     # by whoever calls the server.
     app.state.api_base_url = normalize_base_url(
@@ -1441,7 +1443,10 @@ def main() -> None:
     logger.info(f"🌐 V1 (SSE): http://localhost:{DEFAULT_PORT}/sse")
     logger.info(f"🌐 V2 (Streamable HTTP): http://localhost:{DEFAULT_PORT}/v2/{{project_slug}}/mcp")
 
-    uvicorn.run(app, host="0.0.0.0", port=DEFAULT_PORT)
+    uvicorn.run(
+        app, host=os.environ.get("BIEL_BIND_HOST", "127.0.0.1"),
+        port=DEFAULT_PORT, proxy_headers=True,
+    )
 
 
 if __name__ == "__main__":

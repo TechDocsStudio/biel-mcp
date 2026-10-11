@@ -57,7 +57,9 @@ Ask a question that the user's documentation answers, prefixed to route to the t
 Using biel_ai, what authentication does the API use?
 ```
 
-A correct installation returns an answer with source links to the user's documentation pages.
+A correct installation returns an answer with source links to the user's documentation pages. Confirm that the client discovers all three tools: `biel_ai`, `biel_search`, and `biel_get_document`.
+
+For source retrieval, ask the client to use `biel_search` with a question such as "How does API authentication work?", then `biel_get_document` with relevant document IDs. Search combines keyword and semantic retrieval. The client can answer from that text; call `biel_ai` when the user specifically wants Biel to generate an answer.
 
 ## Troubleshooting
 

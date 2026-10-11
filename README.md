@@ -55,6 +55,32 @@ When AI tools can read your product documentation, they become **significantly**
 Can you check in biel_ai what the auth headers are for the /users endpoint?
 ```
 
+## Choose generated answers or search
+
+The server exposes three tools:
+
+- `biel_ai`: ask Biel.ai to generate an answer, with conversational context. Existing calls using `message` continue to generate answers.
+- `biel_search`: hybrid keyword and semantic search over indexed web pages, uploaded files, repositories and OpenAPI sources, without answer generation.
+- `biel_get_document`: read the complete indexed text of a document returned by search.
+
+Call `biel_search` with a natural-language question or search terms:
+
+```json
+{"query": "How do I authenticate with the SDK?", "limit": 5}
+```
+
+Search requests the API's `search_type=hybrid&source_types=all`. The REST API defaults to `search_type=keyword`, independently of the selected sources. Results include chunk text, source type, a `document_id`, and any page/sheet reference; non-URL documents are cited by title and location. The `limit` argument controls how many chunks are returned (default 5, maximum 20).
+
+Use `biel_get_document` with a search result's `document_id` to read the complete indexed document without visiting its source site:
+
+```json
+{"document_id": "DOCUMENT_ID_FROM_SEARCH", "limit": 20}
+```
+
+Get returns full indexed chunks in reading order, with PDF page and spreadsheet sheet references. Large documents include a `next_cursor`; repeat the call with that cursor and the same `document_id` and `limit` until it is absent. This returns the indexed text, not the original binary upload or live page HTML. References belong to the project's active index generation: search again after a recrawl invalidates a reference. Older repository and OpenAPI sources require a recrawl to populate parent-document identity before get is available.
+
+Search and get do not create or continue a chat. Private projects require an API key with the `search` scope; generated answers use `chats_create`. All operations retain the API's project access, domain and quota checks. The default workflow is **search → get → answer using the retrieved text**. If the calling agent wants Biel.ai to generate an answer, it should ask the user first unless the user has already explicitly requested that. Retrieval failures never automatically switch to generated answers.
+
 ## Self-hosting (Optional)
 
 For advanced users who prefer to run their own MCP server instance:
@@ -62,10 +88,23 @@ For advanced users who prefer to run their own MCP server instance:
 ### Local development
 ```bash
 # Clone and run locally
-git clone https://github.com/techdocsStudio/biel-mcp
+git clone https://github.com/TechDocsStudio/biel-mcp
 cd biel-mcp
-pip install -r requirements.txt
-python biel_mcp_server.py
+pip install .
+biel-mcp
+```
+
+### Use as a Python package
+
+Applications that host their own ASGI stack can install the server directly
+from a tagged revision and import its FastAPI application:
+
+```bash
+pip install "biel-mcp @ git+https://github.com/TechDocsStudio/biel-mcp.git@VERSION"
+```
+
+```python
+from biel_mcp.server import app
 ```
 
 ### Docker deployment

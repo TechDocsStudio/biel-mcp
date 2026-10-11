@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "biel-mcp"
-version = "2.1.0"
+version = "2.1.1"
 description = "Connect MCP clients to documentation indexed by Biel.ai"
 readme = "README.md"
 requires-python = ">=3.9"

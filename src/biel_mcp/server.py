@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 from sse_starlette import EventSourceResponse
 
 # Constants
-SERVER_VERSION = "2.1.0"
+SERVER_VERSION = "2.1.1"
 SERVER_NAME = "biel-ai-mcp"
 DEFAULT_PORT = 7832
 DEFAULT_BASE_URL = "https://app.biel.ai"
@@ -32,14 +32,15 @@ BIEL_SEARCH_PATH_TEMPLATE = "/api/v2/projects/{project_slug}/search/"
 BIEL_DOCUMENT_PATH_TEMPLATE = "/api/v2/projects/{project_slug}/documents/{document_id}/"
 MCP_PROTOCOL_VERSION = "2024-11-05"
 MCP_PROTOCOL_VERSION_V2 = "2025-11-25"
-API_READ_TIMEOUT_SECONDS = float(os.environ.get("BIEL_MCP_READ_TIMEOUT_SECONDS", "60"))
+API_READ_TIMEOUT_SECONDS = float(os.environ.get("BIEL_MCP_READ_TIMEOUT_SECONDS", "600"))
 if not math.isfinite(API_READ_TIMEOUT_SECONDS) or API_READ_TIMEOUT_SECONDS <= 0:
     raise ValueError("BIEL_MCP_READ_TIMEOUT_SECONDS must be a positive finite number")
 REQUEST_TIMEOUT = httpx.Timeout(
     API_READ_TIMEOUT_SECONDS, connect=5.0, write=10.0, pool=5.0
 )
 KEEPALIVE_INTERVAL = 30
-SESSION_TIMEOUT = 300  # 5 minutes
+# Keep conversation credentials available throughout an upstream wait.
+SESSION_TIMEOUT = math.ceil(API_READ_TIMEOUT_SECONDS) + 300
 
 # Error codes
 JSON_PARSE_ERROR = -32700
@@ -460,6 +461,22 @@ def validate_biel_request(arguments: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def chat_recovery_hint(response) -> str:
+    if response.status_code not in (400, 409, 503):
+        return ""
+    try:
+        code = response.json().get("code")
+    except (ValueError, AttributeError):
+        return ""
+    return {
+        "context_limit": "The current request still exceeds the model context after preparing the conversation. Ask about a smaller section; existing messages are preserved.",
+        "compaction_failed": "Earlier conversation could not be prepared right now. Retry in this chat; existing messages are preserved.",
+        "message_too_long": "The message is too long. Use at most 10,000 characters.",
+        "output_limit": "The model reached its output limit before producing an answer. Try a shorter request.",
+        "generation_busy": "This conversation is already generating a response. Wait before retrying.",
+    }.get(code, "") if isinstance(code, str) else ""
+
+
 def format_biel_response(data: Dict[str, Any]) -> str:
     """Format the response from Biel.ai API into a readable string."""
     ai_message = data.get("ai_message", {})
@@ -467,6 +484,13 @@ def format_biel_response(data: Dict[str, Any]) -> str:
     sources = ai_message.get("sources", [])
 
     response_parts = [f"🤖 **Biel.ai responds:**\n\n{ai_response}"]
+
+    if ai_message.get("incomplete"):
+        reason = (ai_message.get("generation_metadata") or {}).get("stop_reason")
+        if reason in ("length", "max_tokens"):
+            response_parts.append("\n\n**Incomplete answer:** The output limit was reached after automatic continuation. Ask for a shorter answer or a specific section.")
+        else:
+            response_parts.append("\n\n**Incomplete answer:** Generation was interrupted. Ask again with the relevant details.")
 
     if sources:
         response_parts.append("\n\n📚 **Sources consulted:**")
@@ -715,7 +739,7 @@ async def query_biel_api(
                     data.get("restore_token"),
                 )
             else:
-                error_msg = f"Biel.ai API returned HTTP {response.status_code}."
+                error_msg = chat_recovery_hint(response) or f"Biel.ai API returned HTTP {response.status_code}."
                 if response.status_code == 403:
                     error_msg += (
                         " Check project search access and quota." if mode != "answer"

@@ -117,12 +117,6 @@ docker build -t biel-mcp .
 docker run -d -p 7832:7832 biel-mcp
 ```
 
-### Request timeout and continuation
-
-`BIEL_MCP_READ_TIMEOUT_SECONDS` sets the upstream API read timeout (default: 600 seconds, or 10 minutes). Connect and pool timeouts remain 5 seconds, and writes have a 10-second timeout. This is the maximum wait between reads, not a total request deadline. Client, API, and proxy deadlines can still end a request earlier.
-
-Conversation credentials remain in the MCP session. Sessions expire after the configured read timeout plus 5 minutes of inactivity (15 minutes by default), allowing a long response to retain its conversation context. After HTTP 404 for an expired session, initialize a new connection without the old session id. Tool failures return `isError: true`; the server logs `mcp.upstream_completed` with duration, status and the upstream request id.
-
 ## Support
 
 - **Issues**: [GitHub Issues](https://github.com/techdocsStudio/biel-mcp/issues)

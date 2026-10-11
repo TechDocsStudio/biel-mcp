@@ -6,6 +6,8 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
 
 import httpx
+from starlette.requests import Request
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from biel_mcp.server import (
     API_READ_TIMEOUT_SECONDS,
     CLIENT_IDENTITY_MAX_LENGTH,
@@ -20,6 +22,7 @@ from biel_mcp.server import (
     format_biel_response,
     chat_recovery_hint,
     format_search_response,
+    get_client_ip,
     header_safe,
     normalize_base_url,
     query_biel_ai,
@@ -768,3 +771,28 @@ class CompactionRecoveryHintTest(TestCase):
         hint = chat_recovery_hint(httpx.Response(400, json={"code":"context_limit"}))
         self.assertIn("smaller section", hint)
         self.assertNotIn("new conversation", hint)
+
+
+class ClientIdentityTest(IsolatedAsyncioTestCase):
+    async def identity_through_proxy(self, peer, trusted_hosts):
+        scope = {
+            "type": "http", "client": (peer, 4321), "scheme": "http",
+            "headers": [(b"x-forwarded-for", b"203.0.113.19"),
+                        (b"x-real-ip", b"198.51.100.20"),
+                        (b"cf-connecting-ip", b"198.51.100.21")],
+        }
+        app = ProxyHeadersMiddleware(self.capture_identity, trusted_hosts=trusted_hosts)
+        await app(scope, None, None)
+        return self.identity
+
+    async def capture_identity(self, scope, receive, send):
+        self.identity = get_client_ip(Request(scope))
+
+    async def test_untrusted_peer_cannot_spoof_client_identity(self):
+        self.assertEqual(await self.identity_through_proxy("192.0.2.1", "127.0.0.1"), "192.0.2.1")
+
+    async def test_trusted_proxy_resolves_forwarded_client_identity(self):
+        self.assertEqual(await self.identity_through_proxy("127.0.0.1", "127.0.0.1"), "203.0.113.19")
+
+    async def test_missing_client_has_no_identity(self):
+        self.assertEqual(get_client_ip(Request({"type": "http", "headers": []})), "")

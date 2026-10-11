@@ -376,17 +376,7 @@ def create_error_response(message: str) -> Dict[str, Any]:
 
 
 def get_client_ip(request: Request) -> str:
-    """Extract real client IP considering common proxy headers"""
-    if "cf-connecting-ip" in request.headers:
-        return request.headers["cf-connecting-ip"].strip()
-
-    if "x-real-ip" in request.headers:
-        return request.headers["x-real-ip"].strip()
-
-    x_forwarded_for = request.headers.get("x-forwarded-for", "")
-    if x_forwarded_for:
-        return x_forwarded_for.split(",")[0].strip()
-
+    """Use the peer identity resolved by the ASGI server's trusted proxy policy."""
     return request.client.host if request.client else ""
 
 
@@ -1453,7 +1443,10 @@ def main() -> None:
     logger.info(f"🌐 V1 (SSE): http://localhost:{DEFAULT_PORT}/sse")
     logger.info(f"🌐 V2 (Streamable HTTP): http://localhost:{DEFAULT_PORT}/v2/{{project_slug}}/mcp")
 
-    uvicorn.run(app, host=os.environ.get("BIEL_BIND_HOST", "127.0.0.1"), port=DEFAULT_PORT)
+    uvicorn.run(
+        app, host=os.environ.get("BIEL_BIND_HOST", "127.0.0.1"),
+        port=DEFAULT_PORT, proxy_headers=True,
+    )
 
 
 if __name__ == "__main__":

@@ -4,32 +4,32 @@ This guide is written for AI agents (like Cline) installing the Biel.ai MCP serv
 
 ## What this server does
 
-Connects AI tools to a product's documentation indexed by Biel.ai. One tool is exposed: ask questions and get answers generated from the indexed docs, with citations to the source pages.
+Connects AI tools to a product's documentation indexed by Biel.ai. Three tools are exposed: `biel_search` retrieves matching indexed chunks, `biel_get_document` reads complete indexed documents, and `biel_ai` requests a Biel-generated answer. Prefer search and document retrieval so the calling assistant can answer from the source text.
 
 ## Prerequisites
 
 Ask the user for:
 
 1. Their **Biel.ai project slug** (found in the dashboard at https://app.biel.ai under the project). If they do not have an account, they can start a trial at https://app.biel.ai/accounts/signup/ and add their documentation URL as a source.
-2. Their **documentation site URL** (only needed for the legacy SSE endpoint).
-3. An **API key**, only if the project is private (most are public; skip unless the connection is rejected).
+2. The **complete MCP endpoint** from **Settings** > **MCP**, including an allowed `domain` when the project restricts domains. Enable MCP and save before copying it.
+3. An **API key**, only if the project is private (public projects do not need a key).
 
 ## Installation (recommended: Streamable HTTP)
 
-Add this to the MCP settings file:
+For Cline, add this to the MCP settings file:
 
 ```json
 {
   "mcpServers": {
     "biel-ai": {
       "type": "streamableHttp",
-      "url": "https://mcp.biel.ai/v2/PROJECT_SLUG/mcp"
+      "url": "https://app.biel.ai/mcp/PROJECT_SLUG"
     }
   }
 }
 ```
 
-Replace `PROJECT_SLUG` with the user's project slug.
+Replace `PROJECT_SLUG` with the user's project slug, or use the full endpoint they copied. Configuration formats differ between clients: use the [Claude Code](https://docs.biel.ai/integrations/mcp-server#connect-technical-documentation-to-claude-code) or [Codex](https://docs.biel.ai/integrations/mcp-server#connect-technical-documentation-to-codex) guide for those clients.
 
 For clients without native Streamable HTTP support, use mcp-remote:
 
@@ -40,31 +40,37 @@ For clients without native Streamable HTTP support, use mcp-remote:
       "command": "npx",
       "args": [
         "mcp-remote",
-        "https://mcp.biel.ai/v2/PROJECT_SLUG/mcp"
+        "https://app.biel.ai/mcp/PROJECT_SLUG"
       ]
     }
   }
 }
 ```
 
-For private projects, append the API key: `https://mcp.biel.ai/v2/PROJECT_SLUG/mcp?api_key=API_KEY`.
+For private projects, append a URL-encoded API key with `search` permission for retrieval and `chats_create` for generated answers: `https://app.biel.ai/mcp/PROJECT_SLUG?api_key=API_KEY`.
+
+Keep URLs containing keys in private client configuration. Do not put them in shared files, public listings, or widget markup. Authorization headers and OAuth login do not replace Biel.ai’s `api_key` query parameter.
 
 ## Verify the installation
 
-Ask a question that the user's documentation answers, prefixed to route to the tool, for example:
+Confirm all three tools are discovered, then ask a question that the user's indexed documentation answers, for example:
 
 ```
-Using biel_ai, what authentication does the API use?
+Use biel_search to find API authentication instructions, then use
+biel_get_document to read relevant results and answer with source links.
 ```
 
-A correct installation returns an answer with source links to the user's documentation pages. Confirm that the client discovers all three tools: `biel_ai`, `biel_search`, and `biel_get_document`.
+Check the retrieved text and references against the user's documentation. References can be URLs or document titles with page or sheet locations.
 
-For source retrieval, ask the client to use `biel_search` with a question such as "How does API authentication work?", then `biel_get_document` with relevant document IDs. Search combines keyword and semantic retrieval. The client can answer from that text; call `biel_ai` when the user specifically wants Biel to generate an answer.
+Search combines keyword and semantic retrieval. Use `biel_get_document` when search excerpts need more context. Follow any returned cursor with the same document ID and limit until the document is complete. Ask before calling `biel_ai`, unless the user already explicitly requested a Biel-generated answer. Retrieval errors must not trigger answer generation.
+
+MCP returns indexed text, not live pages or original uploaded files. After source changes, refresh sources in Biel.ai and search again for current document IDs.
 
 ## Troubleshooting
 
-- **404 or connection refused**: the project slug is wrong. Confirm it in the dashboard.
-- **Authorization error**: the project is private; ask the user for an API key and append it as the `api_key` query parameter.
+- **404**: verify the endpoint and project slug. If an existing session has expired, reconnect.
+- **Connection refused**: check that the client can reach the endpoint host.
+- **403**: check project access, private-project key permissions, allowed domains, and usage limits. Do not assume every access error means the project is private.
 - **Empty or unhelpful answers**: the project may not have finished indexing. Check the project's sync status in the dashboard.
 
 Full documentation: https://docs.biel.ai/integrations/mcp-server

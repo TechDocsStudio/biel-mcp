@@ -4,9 +4,9 @@
       "command": "npx",
       "args": [
         "mcp-remote",
-        "https://mcp.biel.ai/sse?project_slug=YOUR_PROJECT_SLUG&domain=https://your-docs-domain.com"
+        "https://app.biel.ai/mcp/YOUR_PROJECT_SLUG"
       ],
-      "description": "Query your product's documentation, APIs, and knowledge base. Ask about API specs, guides, and troubleshooting."
+      "description": "Search and read technical documentation indexed by Biel.ai."
     }
   }
-} 
+}

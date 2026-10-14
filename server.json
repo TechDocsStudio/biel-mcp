@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "ai.biel/biel-ai",
   "title": "Biel.ai",
-  "description": "Query your product docs from AI tools. Source-cited answers from your indexed documentation.",
+  "description": "Connect AI assistants to technical docs. Search indexed sources or request a Biel-generated answer.",
   "version": "2.0.0",
   "websiteUrl": "https://biel.ai",
   "repository": {

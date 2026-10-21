@@ -85,6 +85,8 @@ Both HTTP transports require an object request with a string method and object
 params. Tool calls require a string name and object arguments. Malformed JSON
 returns HTTP 400 with JSON-RPC error `-32700`; invalid envelopes and params return
 `-32600` and `-32602` before creating a session or calling the upstream API.
+Extra envelope and argument keys remain accepted for client compatibility;
+tool-specific value validation still belongs to the selected tool.
 
 ## Self-hosting (Optional)
 

@@ -81,6 +81,11 @@ Get returns full indexed chunks in reading order, with PDF page and spreadsheet 
 
 Search and get do not create or continue a chat. Private projects require an API key with the `search` scope; generated answers use `chats_create`. All operations retain the API's project access, domain and quota checks. The default workflow is **search → get → answer using the retrieved text**. If the calling agent wants Biel.ai to generate an answer, it should ask the user first unless the user has already explicitly requested that. Retrieval failures never automatically switch to generated answers.
 
+Both HTTP transports require an object request with a string method and object
+params. Tool calls require a string name and object arguments. Malformed JSON
+returns HTTP 400 with JSON-RPC error `-32700`; invalid envelopes and params return
+`-32600` and `-32602` before creating a session or calling the upstream API.
+
 ## Self-hosting (Optional)
 
 For advanced users who prefer to run their own MCP server instance:

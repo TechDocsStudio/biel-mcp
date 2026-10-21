@@ -44,6 +44,8 @@ SESSION_TIMEOUT = math.ceil(API_READ_TIMEOUT_SECONDS) + 300
 
 # Error codes
 JSON_PARSE_ERROR = -32700
+INVALID_REQUEST_ERROR = -32600
+INVALID_PARAMS_ERROR = -32602
 UNKNOWN_METHOD_ERROR = -1
 
 # A project slug becomes a path segment of the API URL this server calls, so it
@@ -802,10 +804,46 @@ def create_mcp_response(msg_id: Optional[str], result: Optional[Dict] = None,
     return response
 
 
+def validate_mcp_request(data: Any) -> Optional[Dict[str, Any]]:
+    """Reject invalid envelopes before session creation or tool dispatch."""
+    if not isinstance(data, dict):
+        return create_mcp_response(None, error={
+            "code": INVALID_REQUEST_ERROR, "message": "Request must be an object"
+        })
+    msg_id = data.get("id")
+    if msg_id is not None and (isinstance(msg_id, bool) or not isinstance(msg_id, (str, int))):
+        return create_mcp_response(None, error={
+            "code": INVALID_REQUEST_ERROR, "message": "Invalid request ID"
+        })
+    method = data.get("method")
+    if not isinstance(method, str) or not method:
+        return create_mcp_response(msg_id, error={
+            "code": INVALID_REQUEST_ERROR, "message": "Method must be a non-empty string"
+        })
+    params = data.get("params", {})
+    if not isinstance(params, dict):
+        return create_mcp_response(msg_id, error={
+            "code": INVALID_PARAMS_ERROR, "message": "Params must be an object"
+        })
+    if method == "tools/call":
+        if not isinstance(params.get("name"), str) or not params["name"]:
+            return create_mcp_response(msg_id, error={
+                "code": INVALID_PARAMS_ERROR, "message": "Tool name must be a non-empty string"
+            })
+        if not isinstance(params.get("arguments", {}), dict):
+            return create_mcp_response(msg_id, error={
+                "code": INVALID_PARAMS_ERROR, "message": "Tool arguments must be an object"
+            })
+    return None
+
+
 async def handle_mcp_request(data: Dict[str, Any], defaults: Dict[str, str] = None,
                             session_id: Optional[str] = None,
                             sessions: Optional[SessionManager] = None) -> Dict[str, Any]:
     """Handle MCP protocol messages."""
+    invalid = validate_mcp_request(data)
+    if invalid is not None:
+        return invalid
     try:
         method = data.get("method")
         msg_id = data.get("id")
@@ -1018,8 +1056,16 @@ async def sse_post_endpoint_v1(
 
     try:
         data = await request.json()
+        invalid = validate_mcp_request(data)
+        if invalid is not None:
+            return JSONResponse(invalid, status_code=400)
         response = await handle_mcp_request(data, defaults)
         return JSONResponse(response)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse(
+            create_mcp_response(None, error={"code": JSON_PARSE_ERROR, "message": "Invalid JSON"}),
+            status_code=400,
+        )
     except Exception:
         logger.error("MCP SSE POST failed", extra={"event": "mcp.sse_post_failed"})
         return JSONResponse(
@@ -1124,6 +1170,9 @@ async def streamable_http_endpoint_v2(
     if request.method == "POST":
         try:
             data = await request.json()
+            invalid = validate_mcp_request(data)
+            if invalid is not None:
+                return JSONResponse(invalid, status_code=400)
             method = data.get("method")
 
             # Handle initialization specially
@@ -1218,7 +1267,7 @@ async def streamable_http_endpoint_v2(
             )
             return JSONResponse(mcp_response)
 
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return JSONResponse(
                 create_mcp_response(
                     None,

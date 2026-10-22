@@ -19,9 +19,7 @@ The usual workflow is to search for relevant content, retrieve indexed documents
 
 ### 1. Enable MCP and copy your endpoint
 
-Open your project in Biel.ai, go to **Settings** > **MCP**, enable the MCP server, and save. Copy the complete endpoint supplied for your project. New connections should use Streamable HTTP. The hosted service uses `https://app.biel.ai/mcp/YOUR_PROJECT_SLUG`; the older `https://mcp.biel.ai/v2/YOUR_PROJECT_SLUG/mcp` route remains available.
-
-Public projects do not need an API key. Private projects require an `api_key` query parameter with `search` permission for retrieval and `chats_create` for generated answers. A `domain` query parameter is needed when allowed domains are configured. See [connection parameters](https://docs.biel.ai/integrations/mcp-server#configuration-parameters) before connecting a private or domain-restricted project. Treat a URL containing a key as a credential and keep it out of shared configuration.
+Open your project in Biel.ai, go to **Settings** > **MCP**, enable the MCP server, and save. Copy the complete endpoint supplied for your project. 
 
 ### 2. Connect your AI client
 
@@ -66,10 +64,11 @@ Use `biel_get_document` with a search result's `document_id` to read the complet
 ```json
 {"document_id": "DOCUMENT_ID_FROM_SEARCH", "limit": 20}
 ```
+## Troubleshooting
 
-Get returns full indexed chunks in reading order, with PDF page and spreadsheet sheet references. Large documents include a `next_cursor`; repeat the call with that cursor and the same `document_id` and `limit` until it is absent. This returns the indexed text, not the original binary upload or live page HTML. References belong to the project's active index generation: search again after a recrawl invalidates a reference. Older repository and OpenAPI sources require a recrawl to populate parent-document identity before get is available.
+Public projects do not need an API key. Private projects require an `api_key` query parameter with `search` permission for retrieval and `chats_create` for generated answers. 
 
-Search and get do not create or continue a chat. Private projects require an API key with the `search` scope; generated answers use `chats_create`. All operations retain the API's project access, domain and quota checks. The default workflow is **search → get → answer using the retrieved text**. If the calling agent wants Biel.ai to generate an answer, it should ask the user first unless the user has already explicitly requested that. Retrieval failures never automatically switch to generated answers.
+A `domain` query parameter is needed when allowed domains are configured. See [connection parameters](https://docs.biel.ai/integrations/mcp-server#configuration-parameters) before connecting a private or domain-restricted project. Treat a URL containing a key as a credential and keep it out of shared configuration.
 
 ## Self-hosting (Optional)
 

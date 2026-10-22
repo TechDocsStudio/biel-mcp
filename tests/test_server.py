@@ -176,6 +176,54 @@ class SessionManagerTest(IsolatedAsyncioTestCase):
 
 
 class ApplicationTest(IsolatedAsyncioTestCase):
+    async def test_invalid_envelopes_are_400_without_sessions_or_upstream_calls(self):
+        bodies = [[], ["request"], "text", 42, None, {},
+                  {"method": []}, {"method": "initialize", "params": []},
+                  {"method": "initialize", "params": None},
+                  {"method": "initialize", "id": {}},
+                  {"method": "initialize", "id": True},
+                  {"method": "tools/call", "params": {"name": []}},
+                  {"method": "tools/call", "params": {"name": "biel_ai", "arguments": []}}]
+        for endpoint in ("/mcp/docs", "/sse"):
+            for body in bodies:
+                with self.subTest(endpoint=endpoint, body=body):
+                    sessions = SessionManager()
+                    app.state.session_manager = sessions
+                    transport = httpx.ASGITransport(app=app)
+                    with patch("biel_mcp.server.query_biel_ai") as query:
+                        async with RealAsyncClient(transport=transport, base_url="http://test") as client:
+                            response = await client.post(endpoint, content=json.dumps(body))
+                        query.assert_not_called()
+                    self.assertEqual(response.status_code, 400)
+                    self.assertIn(response.json()["error"]["code"], (-32600, -32602))
+                    self.assertNotIn("MCP-Session-Id", response.headers)
+                    self.assertEqual(sessions._store.sessions, {})
+
+    async def test_invalid_json_is_a_parse_error_on_both_transports(self):
+        for endpoint in ("/mcp/docs", "/sse"):
+            app.state.session_manager = SessionManager()
+            transport = httpx.ASGITransport(app=app)
+            async with RealAsyncClient(transport=transport, base_url="http://test") as client:
+                for content in ("{", b"\xff"):
+                    response = await client.post(endpoint, content=content)
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(response.json()["error"]["code"], -32700)
+
+    async def test_invalid_params_preserve_request_id_on_established_session(self):
+        sessions = SessionManager()
+        app.state.session_manager = sessions
+        session_id = await sessions.create_session(project_slug="docs")
+        transport = httpx.ASGITransport(app=app)
+        async with RealAsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/mcp/docs", json={"id": "request-9", "method": "tools/call", "params": []},
+                headers={"MCP-Session-Id": session_id},
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["id"], "request-9")
+        self.assertEqual(response.json()["error"]["code"], -32602)
+        self.assertEqual((await sessions.get_session(session_id))["chat_uuid"], "")
+
     async def test_initialize_creates_a_session(self):
         app.state.session_manager = SessionManager()
         transport = httpx.ASGITransport(app=app)

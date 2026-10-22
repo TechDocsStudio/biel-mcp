@@ -77,10 +77,6 @@ Use `biel_get_document` with a search result's `document_id` to read the complet
 {"document_id": "DOCUMENT_ID_FROM_SEARCH", "limit": 20}
 ```
 
-Get returns full indexed chunks in reading order, with PDF page and spreadsheet sheet references. Large documents include a `next_cursor`; repeat the call with that cursor and the same `document_id` and `limit` until it is absent. This returns the indexed text, not the original binary upload or live page HTML. References belong to the project's active index generation: search again after a recrawl invalidates a reference. Older repository and OpenAPI sources require a recrawl to populate parent-document identity before get is available.
-
-Search and get do not create or continue a chat. Private projects require an API key with the `search` scope; generated answers use `chats_create`. All operations retain the API's project access, domain and quota checks. The default workflow is **search → get → answer using the retrieved text**. If the calling agent wants Biel.ai to generate an answer, it should ask the user first unless the user has already explicitly requested that. Retrieval failures never automatically switch to generated answers.
-
 ## Self-hosting (Optional)
 
 For advanced users who prefer to run their own MCP server instance:
@@ -108,6 +104,7 @@ from biel_mcp.server import app
 ```
 
 ### Docker deployment
+
 ```bash
 # Docker Compose (recommended)
 docker-compose up -d --build

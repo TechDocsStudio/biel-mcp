@@ -97,6 +97,7 @@ from biel_mcp.server import app
 ```
 
 ### Docker deployment
+
 ```bash
 # Docker Compose (recommended)
 docker-compose up -d --build

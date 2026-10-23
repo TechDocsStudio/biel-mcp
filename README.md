@@ -4,56 +4,44 @@
     <img alt="Biel.ai" src="./logo.png" width="120" />
   </picture>
   <h1>Biel.ai MCP Server</h1>
-  <h3>Connect your IDE to your product docs</h3>
+  <h3>Give AI assistants context from technical documentation</h3>
 </div>
 
+[Biel.ai](https://biel.ai) turns technical documentation into answers for users and context for AI agents, with links back to the sources. This MCP server connects Claude Code, Codex, Cursor, and other compatible clients to documentation indexed in a Biel.ai project.
 
-Give AI tools like Cursor, VS Code, and Claude Desktop access to your company's product knowledge through the [Biel.ai platform](https://biel.ai).
-
-Biel.ai provides a hosted Retrieval-Augmented Generation (RAG) layer that makes your documentation searchable and useful to AI tools. This enables smarter completions, accurate technical answers, and context-aware suggestions—directly in your IDE or chat environment.
+The usual workflow is to search for relevant content, retrieve indexed documents when more context is needed, and answer in the calling AI assistant. Biel.ai can also generate an answer when you explicitly request one. Source grounding does not eliminate model error; check the retrieved content and references.
 
 ![Demo](./demo.png)
 
-When AI tools can read your product documentation, they become **significantly** more helpful—generating more accurate code completions, answering technical questions with context, and guiding developers with real-time product knowledge.
-
-
-> **Note:** Requires a Biel.ai account and project setup. **[Start your free 15-day trial](https://app.biel.ai/accounts/signup/)**.
-
-<h3><a href="https://docs.biel.ai/integrations/mcp-server?utm_source=github&utm_medium=referral&utm_campaign=readme">See quickstart instructions →</a></h3>
+> Requires a Biel.ai account, indexed sources, and hosted MCP enabled on a plan that includes it. [Create an account](https://app.biel.ai/accounts/signup/) and follow the [MCP setup guide](https://docs.biel.ai/integrations/mcp-server).
 
 ## Getting started
 
-### 1. Get your MCP configuration
+### 1. Enable MCP and copy your endpoint
 
-```json
-{
-  "mcpServers": {
-    "biel-ai": {
-      "description": "Query your product's documentation, APIs, and knowledge base.",
-      "command": "npx",
-      "args": [
-        "mcp-remote",
-        "https://mcp.biel.ai/sse?project_slug=YOUR_PROJECT_SLUG&domain=https://your-docs-domain.com"
-      ]
-    }
-  }
-}
+Open your project in Biel.ai, go to **Settings** > **MCP**, enable the MCP server, and save. Copy the complete endpoint supplied for your project. 
+
+### 2. Connect your AI client
+
+Use the canonical documentation for client-specific steps:
+
+- [Connect technical documentation to Claude Code](https://docs.biel.ai/integrations/mcp-server#connect-technical-documentation-to-claude-code).
+- [Connect technical documentation to Codex](https://docs.biel.ai/integrations/mcp-server#connect-technical-documentation-to-codex).
+- [Connect ChatGPT](https://docs.biel.ai/integrations/chatgpt-plugin) or [Claude](https://docs.biel.ai/integrations/claude-connector).
+- For Cursor and VS Code / Copilot, use the widget's **Connect** menu or the [manual setup guide](https://docs.biel.ai/integrations/mcp-server#manual-configuration).
+
+The [example configuration](./example-mcp.json) uses `mcp-remote` as a bridge for clients without native Streamable HTTP support. Clients with native HTTP support should connect directly using their own configuration format.
+
+### 3. Verify retrieval
+
+Confirm the client discovers `biel_search`, `biel_get_document`, and `biel_ai`. Ask a question your indexed documentation covers:
+
+```text
+Use biel_search to find our API authentication instructions. Read relevant
+results with biel_get_document and explain the required headers with source links.
 ```
 
-**Required:** `project_slug` and `domain`
-**Optional:** `api_key` (only needed for private projects)
-
-### 2. Add to your AI tool
-
-* **Cursor**: **Settings** → **Tools & Integrations* → **New MCP server**.
-* **Claude Desktop**: Edit `claude_desktop_config.json`
-* **VS Code**: Install **MCP extension**.
-
-### 3. Start asking questions
-
-```
-Can you check in biel_ai what the auth headers are for the /users endpoint?
-```
+Check the retrieved text and citations against the documentation. MCP serves indexed content; refresh sources in Biel.ai after documentation changes and search again for current document IDs.
 
 ## Choose generated answers or search
 
@@ -76,14 +64,23 @@ Use `biel_get_document` with a search result's `document_id` to read the complet
 ```json
 {"document_id": "DOCUMENT_ID_FROM_SEARCH", "limit": 20}
 ```
+## Troubleshooting
 
-Get returns full indexed chunks in reading order, with PDF page and spreadsheet sheet references. Large documents include a `next_cursor`; repeat the call with that cursor and the same `document_id` and `limit` until it is absent. This returns the indexed text, not the original binary upload or live page HTML. References belong to the project's active index generation: search again after a recrawl invalidates a reference. Older repository and OpenAPI sources require a recrawl to populate parent-document identity before get is available.
+Public projects do not need an API key. Private projects require an `api_key` query parameter with `search` permission for retrieval and `chats_create` for generated answers. 
 
-Search and get do not create or continue a chat. Private projects require an API key with the `search` scope; generated answers use `chats_create`. All operations retain the API's project access, domain and quota checks. The default workflow is **search → get → answer using the retrieved text**. If the calling agent wants Biel.ai to generate an answer, it should ask the user first unless the user has already explicitly requested that. Retrieval failures never automatically switch to generated answers.
+A `domain` query parameter is needed when allowed domains are configured. See [connection parameters](https://docs.biel.ai/integrations/mcp-server#configuration-parameters) before connecting a private or domain-restricted project. Treat a URL containing a key as a credential and keep it out of shared configuration.
 
 ## Self-hosting (Optional)
 
 For advanced users who prefer to run their own MCP server instance:
+
+Self-hosted servers default to loopback access. Configure `BIEL_ALLOWED_HOSTS`
+with the explicit hostnames clients use and `BIEL_ALLOWED_ORIGINS` with exact
+browser origins; requests without Origin remain supported. Wildcard Host/Origin
+allowlists are rejected. Set `BIEL_BIND_HOST` explicitly for remote access and
+`FORWARDED_ALLOW_IPS` only for trusted proxy peers. Upstream API destinations
+remain a separate `BIEL_ALLOWED_BASE_URLS` policy. Django hosts supply their own
+`TransportPolicy` when mounting the app.
 
 ### Local development
 ```bash
@@ -108,13 +105,14 @@ from biel_mcp.server import app
 ```
 
 ### Docker deployment
+
 ```bash
 # Docker Compose (recommended)
 docker-compose up -d --build
 
 # Or Docker directly
 docker build -t biel-mcp .
-docker run -d -p 7832:7832 biel-mcp
+docker run -d -p 127.0.0.1:7832:7832 -e BIEL_BIND_HOST=0.0.0.0 biel-mcp
 ```
 
 ## Support

@@ -3,7 +3,7 @@
   "name": "ai.biel/biel-ai",
   "title": "Biel.ai",
   "description": "Connect AI assistants to technical docs. Search indexed sources or request a Biel-generated answer.",
-  "version": "2.0.0",
+  "version": "2.2.0",
   "websiteUrl": "https://biel.ai",
   "repository": {
     "url": "https://github.com/TechDocsStudio/biel-mcp",

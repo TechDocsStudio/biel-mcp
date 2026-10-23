@@ -74,6 +74,14 @@ A `domain` query parameter is needed when allowed domains are configured. See [c
 
 For advanced users who prefer to run their own MCP server instance:
 
+Self-hosted servers default to loopback access. Configure `BIEL_ALLOWED_HOSTS`
+with the explicit hostnames clients use and `BIEL_ALLOWED_ORIGINS` with exact
+browser origins; requests without Origin remain supported. Wildcard Host/Origin
+allowlists are rejected. Set `BIEL_BIND_HOST` explicitly for remote access and
+`FORWARDED_ALLOW_IPS` only for trusted proxy peers. Upstream API destinations
+remain a separate `BIEL_ALLOWED_BASE_URLS` policy. Django hosts supply their own
+`TransportPolicy` when mounting the app.
+
 ### Local development
 ```bash
 # Clone and run locally
@@ -104,7 +112,7 @@ docker-compose up -d --build
 
 # Or Docker directly
 docker build -t biel-mcp .
-docker run -d -p 7832:7832 biel-mcp
+docker run -d -p 127.0.0.1:7832:7832 -e BIEL_BIND_HOST=0.0.0.0 biel-mcp
 ```
 
 ## Support

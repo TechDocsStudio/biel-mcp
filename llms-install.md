@@ -1,6 +1,6 @@
 # Biel.ai MCP server installation guide
 
-This guide is written for AI agents (like Cline) installing the Biel.ai MCP server on a user's behalf. Biel.ai is a hosted service: there is nothing to build or run locally. You only need the user's project details.
+This guide is for AI agents configuring the hosted Biel.ai MCP server on a user's behalf. You only need the user's project details. For a local server, see the [self-hosting instructions](./README.md#self-hosting-optional).
 
 ## What this server does
 
@@ -29,7 +29,7 @@ For Cline, add this to the MCP settings file:
 }
 ```
 
-Replace `PROJECT_SLUG` with the user's project slug, or use the full endpoint they copied. Configuration formats differ between clients: use the [Claude Code](https://docs.biel.ai/integrations/mcp-server#connect-technical-documentation-to-claude-code) or [Codex](https://docs.biel.ai/integrations/mcp-server#connect-technical-documentation-to-codex) guide for those clients.
+Replace `PROJECT_SLUG` with the user's project slug, or use the full endpoint they copied. Configuration formats differ between clients: use the [manual setup guide](https://docs.biel.ai/integrations/mcp-server#manual-configuration) and the client's HTTP configuration format.
 
 For clients without native Streamable HTTP support, use mcp-remote:
 
@@ -55,7 +55,7 @@ Keep URLs containing keys in private client configuration. Do not put them in sh
 
 Confirm all three tools are discovered, then ask a question that the user's indexed documentation answers, for example:
 
-```
+```text
 Use biel_search to find API authentication instructions, then use
 biel_get_document to read relevant results and answer with source links.
 ```
@@ -66,6 +66,14 @@ Search combines keyword and semantic retrieval. Use `biel_get_document` when sea
 
 MCP returns indexed text, not live pages or original uploaded files. After source changes, refresh sources in Biel.ai and search again for current document IDs.
 
+## Continue generated answers
+
+For Streamable HTTP clients using MCP protocol `2025-11-25` or earlier, the connection keeps the `biel_ai` conversation automatically. Do not supply a chat UUID or restore token.
+
+For protocol `2026-07-28`, omit `conversation_id` on the first `biel_ai` call. Reuse the opaque identifier returned in the result text and `structuredContent.conversation_id` on follow-up calls. Use the same project, API key and backend. Omitting the identifier starts a new chat. An invalid or expired identifier returns a tool error. With default settings, conversation state expires after 15 minutes of inactivity.
+
+Keep conversation IDs in the current user's conversation. Search and document reads do not require them.
+
 ## Troubleshooting
 
 - **404**: verify the endpoint and project slug. If an existing session has expired, reconnect.
@@ -73,4 +81,4 @@ MCP returns indexed text, not live pages or original uploaded files. After sourc
 - **403**: check project access, private-project key permissions, allowed domains, and usage limits. Do not assume every access error means the project is private.
 - **Empty or unhelpful answers**: the project may not have finished indexing. Check the project's sync status in the dashboard.
 
-Full documentation: https://docs.biel.ai/integrations/mcp-server
+See the [full MCP documentation](https://docs.biel.ai/integrations/mcp-server).

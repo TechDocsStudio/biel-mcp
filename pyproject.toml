@@ -7,14 +7,16 @@ name = "biel-mcp"
 version = "2.1.1"
 description = "Connect MCP clients to documentation indexed by Biel.ai"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
-    "fastapi>=0.115.0",
+    "mcp>=2.3,<2.4",
     "httpx>=0.26.0",
-    "sse-starlette>=2.1.3",
     "uvicorn>=0.32.0",
 ]
+
+[project.optional-dependencies]
+test = ["asgi-lifespan>=2.1,<3"]
 
 [project.urls]
 Homepage = "https://biel.ai"

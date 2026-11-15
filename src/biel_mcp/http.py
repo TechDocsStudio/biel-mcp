@@ -98,6 +98,7 @@ class MCPHTTPBoundary:
                     },
                     sessions=context.sessions,
                     conversations=context.conversations,
+                    transport="sse",
                 )
                 scope = {**scope, "biel_mcp_context": context}
             token = current_request.set(context)
@@ -182,6 +183,7 @@ class MCPHTTPBoundary:
             session_id=session_id,
             sessions=state.session_manager,
             conversations=state.conversation_manager,
+            transport="sse" if is_sse else "streamable_http",
         )
         rewritten = {
             **scope,

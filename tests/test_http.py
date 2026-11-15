@@ -177,11 +177,13 @@ class HTTPTest(IsolatedAsyncioTestCase):
         for path in ("/mcp/docs", "/v2/docs/mcp"):
             async with (
                 httpx2.AsyncClient(
-                    transport=httpx2.ASGITransport(app=self.app)
+                    transport=httpx2.ASGITransport(app=self.app),
+                    headers={"X-MCP-Transport": "sse"},
                 ) as wire,
                 Client(
                     streamable_http_client(
-                        f"http://testserver{path}?api_key=private-key", http_client=wire
+                        f"http://testserver{path}?api_key=private-key&mcp_transport=sse&transport=sse",
+                        http_client=wire,
                     ),
                     mode="legacy",
                     client_info=Implementation(name="real-client", version="3"),
@@ -205,6 +207,10 @@ class HTTPTest(IsolatedAsyncioTestCase):
                     result = await client.call_tool(name, arguments)
                     self.assertFalse(result.is_error, result)
                     self.assertIn(text, result.content[0].text)
+                    self.assertEqual(
+                        self.backend.requests[-1].headers["X-MCP-Transport"],
+                        "streamable_http",
+                    )
             self.assertEqual(
                 self.backend.requests[-1].headers["X-MCP-Client-Name"], "real-client"
             )
@@ -238,6 +244,12 @@ class HTTPTest(IsolatedAsyncioTestCase):
             self.backend.requests[-1].headers["X-MCP-Client-Name"], "modern-client"
         )
         self.assertEqual(self.sessions.sessions, {})
+        self.assertTrue(
+            all(
+                request.headers["X-MCP-Transport"] == "streamable_http"
+                for request in self.backend.requests
+            )
+        )
 
     async def test_legacy_continuation_identity_and_search_survive_an_instance_hop(
         self,
@@ -245,6 +257,7 @@ class HTTPTest(IsolatedAsyncioTestCase):
         other = await self.http(await self.new_app())
         path = "/mcp/docs?api_key=private-key&domain=https%3A%2F%2Fdocs.example.com&metadata=docs-mcp"
         identifier, headers = await self.established(path)
+        self.sessions.sessions[identifier]["mcp_transport"] = "sse"
         first = await self.client.post(
             path, json=call(message="first"), headers=headers
         )
@@ -267,6 +280,7 @@ class HTTPTest(IsolatedAsyncioTestCase):
         self.assertEqual(
             relay.headers["X-Chat-Restore-Token"], "secret-restore-backend-chat-1"
         )
+        self.assertEqual(relay.headers["X-MCP-Transport"], "streamable_http")
         self.assertEqual(
             (await self.app.state.session_manager.get_session(identifier))["chat_uuid"],
             "backend-chat-1",
@@ -544,6 +558,12 @@ class HTTPTest(IsolatedAsyncioTestCase):
             },
             {"alpha": "Api-Key key-alpha", "beta": "Api-Key key-beta"},
         )
+        self.assertTrue(
+            all(
+                request.headers["X-MCP-Transport"] == "streamable_http"
+                for request in self.backend.requests
+            )
+        )
 
     async def test_sse_sdk_client_preserves_get_configuration_across_message_posts(
         self,
@@ -586,6 +606,48 @@ class HTTPTest(IsolatedAsyncioTestCase):
                 self.assertEqual(
                     response.structured_content["conversation_id"], identifier
                 )
+                self.assertEqual(
+                    self.backend.requests[-1].headers["X-MCP-Transport"], "sse"
+                )
+                for name, arguments in (
+                    ("biel_search", {"query": "SSE source"}),
+                    ("biel_get_document", {"document_id": "123:signed-reference"}),
+                ):
+                    result = await client.call_tool(name, arguments)
+                    self.assertFalse(result.is_error, result)
+                    self.assertEqual(
+                        self.backend.requests[-1].headers["X-MCP-Transport"], "sse"
+                    )
+                async with Client(
+                    f"http://127.0.0.1:{port}/mcp/parallel?api_key=http-key&transport=sse",
+                    mode="2026-07-28",
+                ) as http_client:
+                    start = len(self.backend.requests)
+                    results = await asyncio.gather(
+                        client.call_tool("biel_search", {"query": "SSE concurrent"}),
+                        http_client.call_tool(
+                            "biel_search", {"query": "HTTP concurrent"}
+                        ),
+                    )
+                    self.assertTrue(all(not result.is_error for result in results))
+                    self.assertEqual(
+                        {
+                            request.url.path.split("/")[4]: (
+                                request.headers["X-MCP-Transport"],
+                                request.headers["Authorization"],
+                            )
+                            for request in self.backend.requests[start:]
+                        },
+                        {
+                            "docs": ("sse", "Api-Key sse-key"),
+                            "parallel": ("streamable_http", "Api-Key http-key"),
+                        },
+                    )
+                response = await client.call_tool(
+                    "biel_ai",
+                    {"message": "SSE final follow-up", "conversation_id": identifier},
+                )
+                self.assertFalse(response.is_error, response)
             request = self.backend.requests[-1]
             self.assertEqual(request.headers["Authorization"], "Api-Key sse-key")
             self.assertEqual(request.headers["X-MCP-Client-Name"], "sse-client")

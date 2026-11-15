@@ -76,6 +76,7 @@ def request_defaults(ctx: Context, bound: RequestContext) -> dict[str, str]:
     if not bound.session_id and info is not None:
         defaults["client_name"] = api.header_safe(info.name)
         defaults["client_version"] = api.header_safe(info.version)
+    defaults["mcp_transport"] = bound.transport
     return defaults
 
 

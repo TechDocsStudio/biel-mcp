@@ -2,6 +2,7 @@
 
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from typing import Literal
 
 from .sessions import SessionManager
 
@@ -12,6 +13,7 @@ class RequestContext:
     session_id: str | None = None
     sessions: SessionManager | None = None
     conversations: SessionManager | None = None
+    transport: Literal["streamable_http", "sse", "unknown"] = "unknown"
 
 
 current_request: ContextVar[RequestContext | None] = ContextVar(

@@ -410,6 +410,9 @@ async def query_biel_api(
     client_version = (defaults or {}).get("client_version", "")
     user_agent = (defaults or {}).get("user_agent", "")
     restore_token = (defaults or {}).get("restore_token", "")
+    transport = (defaults or {}).get("mcp_transport", "unknown")
+    if transport not in ("streamable_http", "sse"):
+        transport = "unknown"
 
     # Prepare request
     payload = {
@@ -424,6 +427,7 @@ async def query_biel_api(
     headers = {
         "Content-Type": "application/json",
         "X-Biel-Source": "mcp",  # Identifies requests coming from the MCP server
+        "X-MCP-Transport": transport,
     }
     if api_key:
         headers["Authorization"] = f"Api-Key {api_key}"

@@ -72,6 +72,17 @@ class SdkToolTest(IsolatedAsyncioTestCase):
             self.requests.append(request)
             if request.url.path.endswith("/search/"):
                 return httpx.Response(200, json={"results": []})
+            if "/documents/" in request.url.path:
+                return httpx.Response(
+                    200,
+                    json={
+                        "document_id": "123:signed-reference",
+                        "title": "Setup",
+                        "source_type": "page",
+                        "total_chunks": 1,
+                        "chunks": [{"content": "Setup instructions", "chunk_index": 0}],
+                    },
+                )
             return httpx.Response(200, json=self.response)
 
         self.upstream = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
@@ -94,6 +105,29 @@ class SdkToolTest(IsolatedAsyncioTestCase):
             create_server(client=self.upstream),
             client_info=Implementation(name="Test editor", version="1.2"),
         )
+
+    async def test_direct_sdk_factory_reports_unknown_transport_for_all_tools(self):
+        self.bound.defaults["mcp_transport"] = "sse"
+        async with self.client() as client:
+            for tool in (await client.list_tools()).tools:
+                self.assertNotIn("mcp_transport", tool.input_schema["properties"])
+                self.assertNotIn("transport", tool.input_schema["properties"])
+            for name, arguments in (
+                ("biel_ai", {"message": "First"}),
+                ("biel_search", {"query": "Setup"}),
+                ("biel_get_document", {"document_id": "123:signed-reference"}),
+            ):
+                result = await client.call_tool(name, arguments)
+                self.assertFalse(result.is_error, result)
+                self.assertEqual(
+                    self.requests[-1].headers["X-MCP-Transport"], "unknown"
+                )
+            count = len(self.requests)
+            rejected = await client.call_tool(
+                "biel_search", {"query": "Setup", "mcp_transport": "sse"}
+            )
+            self.assertTrue(rejected.is_error)
+            self.assertEqual(len(self.requests), count)
 
     async def test_modern_follow_up_crosses_servers_without_exposing_restore_token(
         self,

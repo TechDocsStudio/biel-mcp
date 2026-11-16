@@ -6,7 +6,7 @@
         "mcp-remote",
         "https://app.biel.ai/mcp/YOUR_PROJECT_SLUG"
       ],
-      "description": "Search and read technical documentation indexed by Biel.ai."
+      "description": "Search and read technical documentation indexed by Biel.ai, or explicitly request a generated answer."
     }
   }
 }

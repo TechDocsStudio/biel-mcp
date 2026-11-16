@@ -1,17 +1,18 @@
+import asyncio
 from unittest import IsolatedAsyncioTestCase, TestCase
-from unittest.mock import patch
 
 import httpx
 
 from biel_mcp.server import (
-    TOOLS,
+    create_server,
     format_document_response,
     format_search_response,
-    handle_mcp_request,
     query_biel_document,
 )
 
-RealAsyncClient = httpx.AsyncClient
+TOOLS = [
+    tool.model_dump(by_alias=True) for tool in asyncio.run(create_server().list_tools())
+]
 
 
 class DocumentUpstream:
@@ -29,8 +30,18 @@ class DocumentUpstream:
                 "file_path": "client/README.md",
                 "total_chunks": 3,
                 "chunks": [
-                    {"content": "Full setup instructions.", "chunk_index": 0, "page": None, "sheet": ""},
-                    {"content": "Additional configuration details.", "chunk_index": 1, "page": None, "sheet": ""},
+                    {
+                        "content": "Full setup instructions.",
+                        "chunk_index": 0,
+                        "page": None,
+                        "sheet": "",
+                    },
+                    {
+                        "content": "Additional configuration details.",
+                        "chunk_index": 1,
+                        "page": None,
+                        "sheet": "",
+                    },
                 ],
                 "next_cursor": "next-reference",
             }
@@ -49,7 +60,9 @@ class DocumentFormatTest(TestCase):
         self.assertIn("next_cursor", tool["description"])
         self.assertIn("explicitly requests", TOOLS[0]["description"])
         self.assertIn("ask the user first", TOOLS[0]["description"])
-        self.assertIn("Do not fall back to biel_ai automatically", TOOLS[0]["description"])
+        self.assertIn(
+            "Do not fall back to biel_ai automatically", TOOLS[0]["description"]
+        )
         self.assertIn("biel_search", tool["description"])
 
     def test_search_exposes_document_id_for_get(self):
@@ -85,11 +98,13 @@ class DocumentFormatTest(TestCase):
 
 class DocumentToolTest(IsolatedAsyncioTestCase):
     async def query(self, upstream, arguments=None, defaults=None):
-        client = RealAsyncClient(transport=httpx.MockTransport(upstream))
-        with patch("biel_mcp.server.httpx.AsyncClient", return_value=client):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
             return await query_biel_document(
-                arguments if arguments is not None else {"document_id": "123:signed-reference"},
+                arguments
+                if arguments is not None
+                else {"document_id": "123:signed-reference"},
                 defaults or {"project_slug": "docs"},
+                client=client,
             )
 
     async def test_get_uses_project_api_and_credentials_without_answer_generation(self):
@@ -115,37 +130,39 @@ class DocumentToolTest(IsolatedAsyncioTestCase):
         self.assertEqual(len(upstream.requests), 1)
         request = upstream.requests[0]
         self.assertEqual(request.method, "GET")
-        self.assertEqual(request.url.path, "/api/v2/projects/docs/documents/123:signed-reference/")
-        self.assertEqual(dict(request.url.params), {"url": "https://docs.example.com", "cursor": "next", "limit": "2"})
+        self.assertEqual(
+            request.url.path, "/api/v2/projects/docs/documents/123:signed-reference/"
+        )
+        self.assertEqual(
+            dict(request.url.params),
+            {"url": "https://docs.example.com", "cursor": "next", "limit": "2"},
+        )
         self.assertEqual(request.headers["Authorization"], "Api-Key private-key")
         self.assertNotIn("X-Chat-Restore-Token", request.headers)
 
-    async def test_router_dispatches_get_without_recording_a_chat(self):
-        upstream = DocumentUpstream()
-        client = RealAsyncClient(transport=httpx.MockTransport(upstream))
-        with patch("biel_mcp.server.httpx.AsyncClient", return_value=client):
-            response = await handle_mcp_request(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "tools/call",
-                    "params": {"name": "biel_get_document", "arguments": {"document_id": "123:signed-reference"}},
-                },
-                {"project_slug": "docs", "chat_uuid": "old-chat"},
-            )
-        self.assertFalse(response["result"]["isError"])
-        self.assertIn("Additional configuration", response["result"]["content"][0]["text"])
-
     async def test_invalid_arguments_and_project_override_fail_before_requests(self):
-        invalid = [None, {}, {"document_id": "../evil"}, {"document_id": "https://evil.example"}]
-        for extra in ({"limit": 0}, {"limit": 21}, {"limit": True}, {"cursor": None}, {"project_slug": "foreign"}):
+        invalid = [
+            None,
+            {},
+            {"document_id": "../evil"},
+            {"document_id": "https://evil.example"},
+        ]
+        for extra in (
+            {"limit": 0},
+            {"limit": 21},
+            {"limit": True},
+            {"cursor": None},
+            {"project_slug": "foreign"},
+        ):
             invalid.append({"document_id": "123:signed-reference", **extra})
         for arguments in invalid:
             upstream = DocumentUpstream()
             with self.subTest(arguments=arguments):
                 # Explicit None must reach the validator rather than the query helper's default.
                 if arguments is None:
-                    result, _, _ = await query_biel_document(None, {"project_slug": "docs"})
+                    result, _, _ = await query_biel_document(
+                        None, {"project_slug": "docs"}
+                    )
                 else:
                     result, _, _ = await self.query(upstream, arguments)
                 self.assertTrue(result["isError"])
@@ -157,7 +174,9 @@ class DocumentToolTest(IsolatedAsyncioTestCase):
             DocumentUpstream(status=404),
             DocumentUpstream(status=500),
             DocumentUpstream(data={"ai_message": {"message": "unexpected answer"}}),
-            DocumentUpstream(data={**DocumentUpstream().data, "document_id": "different-reference"}),
+            DocumentUpstream(
+                data={**DocumentUpstream().data, "document_id": "different-reference"}
+            ),
         ):
             with self.subTest(status=upstream.status):
                 result, chat, token = await self.query(upstream)

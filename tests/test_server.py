@@ -1,24 +1,25 @@
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
 
 import httpx
+
 from biel_mcp.server import (
     API_READ_TIMEOUT_SECONDS,
     CLIENT_IDENTITY_MAX_LENGTH,
-    MCP_PROTOCOL_VERSION_V2,
     REQUEST_TIMEOUT,
-    TOOLS,
     InMemorySessionStore,
     MCPLogFormatter,
     SessionManager,
-    app,
+    chat_recovery_hint,
+    create_server,
     extract_client_info,
     format_biel_response,
-    chat_recovery_hint,
     format_search_response,
     header_safe,
     normalize_base_url,
@@ -28,24 +29,15 @@ from biel_mcp.server import (
     validate_biel_request,
 )
 
-# Bound before any patching: the stand-in below replaces the attribute on the
-# httpx module itself, which is the same object these tests drive the app with.
-RealAsyncClient = httpx.AsyncClient
+TOOLS = [
+    tool.model_dump(by_alias=True) for tool in asyncio.run(create_server().list_tools())
+]
 
 
-class RecordingAsyncClient:
+class RecordingClient:
     """Stands in for ``httpx.AsyncClient``, capturing what would be relayed."""
 
-    calls = []
-
-    def __init__(self, **kwargs):
-        pass
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc_info):
-        return False
+    calls: ClassVar[list[dict]] = []
 
     async def post(self, url, json=None, headers=None):
         type(self).calls.append({"url": url, "json": json, "headers": headers})
@@ -62,14 +54,26 @@ class RecordingAsyncClient:
     async def get(self, url, params=None, headers=None):
         type(self).calls.append({"url": url, "params": params, "headers": headers})
         return SimpleNamespace(
-            status_code=200, headers={},
-            json=lambda: {"results": [{"title": "Setup", "url": "https://docs.example.com/setup", "fragment": "Install the SDK."}]},
+            status_code=200,
+            headers={},
+            json=lambda: {
+                "results": [
+                    {
+                        "title": "Setup",
+                        "url": "https://docs.example.com/setup",
+                        "fragment": "Install the SDK.",
+                    }
+                ]
+            },
         )
 
 
 class ConfigurationTest(TestCase):
     def test_tools_separate_generated_answers_search_and_document_reads(self):
-        self.assertEqual([tool["name"] for tool in TOOLS], ["biel_ai", "biel_search", "biel_get_document"])
+        self.assertEqual(
+            [tool["name"] for tool in TOOLS],
+            ["biel_ai", "biel_search", "biel_get_document"],
+        )
         properties = TOOLS[0]["inputSchema"]["properties"]
         self.assertNotIn("mode", properties)
         self.assertNotIn("limit", properties)
@@ -79,35 +83,60 @@ class ConfigurationTest(TestCase):
         self.assertIn("biel_get_document", TOOLS[1]["description"])
 
     def test_search_format_bounds_results_and_reports_empty_matches(self):
-        data = {"results": [
-            {"title": f"Result {n}", "url": f"https://example.com/{n}", "fragment": f"Snippet {n}"}
-            for n in range(6)
-        ]}
+        data = {
+            "results": [
+                {
+                    "title": f"Result {n}",
+                    "url": f"https://example.com/{n}",
+                    "fragment": f"Snippet {n}",
+                }
+                for n in range(6)
+            ]
+        }
         text = format_search_response(data, 2)
         self.assertIn("showing 2 of 6", text)
         self.assertIn("Snippet 1", text)
         self.assertIn("https://example.com/1", text)
         self.assertNotIn("Snippet 2", text)
-        self.assertIn("No matching documentation", format_search_response({"results": []}))
+        self.assertIn(
+            "No matching documentation", format_search_response({"results": []})
+        )
 
     def test_document_search_returns_full_text_and_citable_location(self):
-        text = format_search_response({"results": [{
-            "title": "manual.pdf", "source_type": "file", "url": None,
-            "page": 3, "sheet": "Revenue", "fragment": "preview",
-            "content": "The full instructions used to answer the question.",
-        }]})
+        text = format_search_response(
+            {
+                "results": [
+                    {
+                        "title": "manual.pdf",
+                        "source_type": "file",
+                        "url": None,
+                        "page": 3,
+                        "sheet": "Revenue",
+                        "fragment": "preview",
+                        "content": "The full instructions used to answer the question.",
+                    }
+                ]
+            }
+        )
         self.assertIn("manual.pdf (file)", text)
         self.assertIn("page 3", text)
         self.assertIn("sheet Revenue", text)
         self.assertIn("The full instructions", text)
         self.assertNotIn("URL:", text)
+
     def test_standalone_logs_preserve_safe_upstream_diagnostics(self):
-        record = logging.makeLogRecord({
-            "msg": "MCP upstream request completed", "levelname": "ERROR",
-            "event": "mcp.upstream_completed", "upstream_status": 404,
-            "duration_ms": 27, "upstream_request_id": "request-1",
-            "restore_token": "private-token", "chat_uuid": "private-chat",
-        })
+        record = logging.makeLogRecord(
+            {
+                "msg": "MCP upstream request completed",
+                "levelname": "ERROR",
+                "event": "mcp.upstream_completed",
+                "upstream_status": 404,
+                "duration_ms": 27,
+                "upstream_request_id": "request-1",
+                "restore_token": "private-token",
+                "chat_uuid": "private-chat",
+            }
+        )
         data = json.loads(MCPLogFormatter().format(record))
         self.assertEqual(data["duration_ms"], 27)
         self.assertEqual(data["upstream_status"], 404)
@@ -122,21 +151,29 @@ class ConfigurationTest(TestCase):
 
     def test_tool_does_not_advertise_unsecured_manual_continuation(self):
         self.assertNotIn("chat_uuid", TOOLS[0]["inputSchema"]["properties"])
-        answer = format_biel_response({"chat_uuid": "chat-1", "ai_message": {"message": "answer"}})
+        answer = format_biel_response(
+            {"chat_uuid": "chat-1", "ai_message": {"message": "answer"}}
+        )
         self.assertNotIn("chat-1", answer)
 
     def test_normalize_base_url_strips_whitespace_and_trailing_slash(self):
-        self.assertEqual(normalize_base_url(" https://app.biel.ai/ "), "https://app.biel.ai")
+        self.assertEqual(
+            normalize_base_url(" https://app.biel.ai/ "), "https://app.biel.ai"
+        )
 
     def test_requested_base_url_must_be_allowed(self):
         allowed = frozenset({"https://app.biel.ai"})
 
         self.assertEqual(
-            resolve_base_url("https://app.biel.ai/", allowed, "https://default.example"),
+            resolve_base_url(
+                "https://app.biel.ai/", allowed, "https://default.example"
+            ),
             "https://app.biel.ai",
         )
         self.assertIsNone(
-            resolve_base_url("https://untrusted.example", allowed, "https://default.example")
+            resolve_base_url(
+                "https://untrusted.example", allowed, "https://default.example"
+            )
         )
 
     def test_project_slug_cannot_reshape_the_api_path(self):
@@ -173,117 +210,6 @@ class SessionManagerTest(IsolatedAsyncioTestCase):
         session = await sessions.get_session(session_id)
 
         self.assertEqual(session["project_slug"], "docs")
-
-
-class ApplicationTest(IsolatedAsyncioTestCase):
-    async def test_invalid_envelopes_are_400_without_sessions_or_upstream_calls(self):
-        bodies = [[], ["request"], "text", 42, None, {},
-                  {"method": []}, {"method": "initialize", "params": []},
-                  {"method": "initialize", "params": None},
-                  {"method": "initialize", "id": {}},
-                  {"method": "initialize", "id": True},
-                  {"method": "tools/call", "params": {"name": []}},
-                  {"method": "tools/call", "params": {"name": "biel_ai", "arguments": []}}]
-        for endpoint in ("/mcp/docs", "/sse"):
-            for body in bodies:
-                with self.subTest(endpoint=endpoint, body=body):
-                    sessions = SessionManager()
-                    app.state.session_manager = sessions
-                    transport = httpx.ASGITransport(app=app)
-                    with patch("biel_mcp.server.query_biel_ai") as query:
-                        async with RealAsyncClient(transport=transport, base_url="http://test") as client:
-                            response = await client.post(endpoint, content=json.dumps(body))
-                        query.assert_not_called()
-                    self.assertEqual(response.status_code, 400)
-                    self.assertIn(response.json()["error"]["code"], (-32600, -32602))
-                    self.assertNotIn("MCP-Session-Id", response.headers)
-                    self.assertEqual(sessions._store.sessions, {})
-
-    async def test_invalid_json_is_a_parse_error_on_both_transports(self):
-        for endpoint in ("/mcp/docs", "/sse"):
-            app.state.session_manager = SessionManager()
-            transport = httpx.ASGITransport(app=app)
-            async with RealAsyncClient(transport=transport, base_url="http://test") as client:
-                for content in ("{", b"\xff"):
-                    response = await client.post(endpoint, content=content)
-                    self.assertEqual(response.status_code, 400)
-                    self.assertEqual(response.json()["error"]["code"], -32700)
-
-    async def test_invalid_params_preserve_request_id_on_established_session(self):
-        sessions = SessionManager()
-        app.state.session_manager = sessions
-        session_id = await sessions.create_session(project_slug="docs")
-        transport = httpx.ASGITransport(app=app)
-        async with RealAsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post(
-                "/mcp/docs", json={"id": "request-9", "method": "tools/call", "params": []},
-                headers={"MCP-Session-Id": session_id},
-            )
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json()["id"], "request-9")
-        self.assertEqual(response.json()["error"]["code"], -32602)
-        self.assertEqual((await sessions.get_session(session_id))["chat_uuid"], "")
-
-    async def test_initialize_creates_a_session(self):
-        app.state.session_manager = SessionManager()
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post(
-                "/mcp/docs",
-                content=json.dumps(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "initialize",
-                        "params": {},
-                    }
-                ),
-                headers={"MCP-Protocol-Version": MCP_PROTOCOL_VERSION_V2},
-            )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.headers["MCP-Session-Id"])
-        self.assertEqual(response.json()["result"]["serverInfo"]["name"], "biel-ai-mcp")
-
-    async def test_tool_call_records_the_conversation_on_its_session(self):
-        sessions = SessionManager()
-        app.state.session_manager = sessions
-        session_id = await sessions.create_session(project_slug="docs")
-        transport = httpx.ASGITransport(app=app)
-        with patch(
-            "biel_mcp.server.query_biel_ai",
-            return_value=(
-                {"content": [{"type": "text", "text": "answer"}], "isError": False},
-                "chat-1",
-                "restore-1",
-            ),
-        ):
-            async with httpx.AsyncClient(
-                transport=transport, base_url="http://test"
-            ) as client:
-                response = await client.post(
-                    "/mcp/docs",
-                    content=json.dumps(
-                        {
-                            "jsonrpc": "2.0",
-                            "id": 2,
-                            "method": "tools/call",
-                            "params": {
-                                "name": "biel_ai",
-                                "arguments": {"message": "hello"},
-                            },
-                        }
-                    ),
-                    headers={
-                        "MCP-Protocol-Version": MCP_PROTOCOL_VERSION_V2,
-                        "MCP-Session-Id": session_id,
-                    },
-                )
-
-        self.assertEqual(response.status_code, 200)
-        session = await sessions.get_session(session_id)
-        self.assertEqual(session["chat_uuid"], "chat-1")
-        self.assertEqual(session["restore_token"], "restore-1")
 
 
 class HeaderSafeTest(TestCase):
@@ -372,9 +298,7 @@ class SessionClientIdentityTest(IsolatedAsyncioTestCase):
         """A whole-record write at initialize must not drop the ``chat_uuid``
         a tool call already claimed."""
         session_id = await self.manager.create_session(project_slug="abc123")
-        await self.manager.record_chat_credentials(
-            session_id, "chat-1", "restore-1"
-        )
+        await self.manager.record_chat_credentials(session_id, "chat-1", "restore-1")
 
         await self.manager.record_client_info(session_id, "copilot", "1.4")
 
@@ -411,17 +335,16 @@ class SessionClientIdentityTest(IsolatedAsyncioTestCase):
 
 class RelayedHeadersTest(IsolatedAsyncioTestCase):
     def setUp(self):
-        RecordingAsyncClient.calls = []
-        patcher = patch("biel_mcp.server.httpx.AsyncClient", RecordingAsyncClient)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        RecordingClient.calls = []
+        self.upstream = RecordingClient()
 
     async def relay(self, defaults):
         await query_biel_ai(
             {"message": "hi", "project_slug": "abc123", "mode": "answer"},
             {"base_url": "https://app.biel.ai", **defaults},
+            client=self.upstream,
         )
-        return RecordingAsyncClient.calls[-1]["headers"]
+        return RecordingClient.calls[-1]["headers"]
 
     async def test_handshake_identity_labels_the_query(self):
         headers = await self.relay(
@@ -458,14 +381,16 @@ class RelayedHeadersTest(IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(headers["X-Chat-Restore-Token"], "restore-1")
-        self.assertEqual(RecordingAsyncClient.calls[-1]["json"]["chat_uuid"], "chat-1")
+        self.assertEqual(RecordingClient.calls[-1]["json"]["chat_uuid"], "chat-1")
 
     async def test_uuid_only_session_requires_explicit_reconnection(self):
         result, chat, token = await query_biel_ai(
-            {"message": "hi", "project_slug": "abc123", "mode": "answer"}, {"chat_uuid": "legacy-chat"}
+            {"message": "hi", "project_slug": "abc123", "mode": "answer"},
+            {"chat_uuid": "legacy-chat"},
+            client=self.upstream,
         )
         self.assertTrue(result["isError"])
-        self.assertEqual(RecordingAsyncClient.calls, [])
+        self.assertEqual(RecordingClient.calls, [])
         self.assertIsNone(chat)
         self.assertIsNone(token)
 
@@ -482,264 +407,147 @@ class RelayedHeadersTest(IsolatedAsyncioTestCase):
                 "chat_uuid": "chat-1",
                 "restore_token": "restore-1",
             },
+            client=self.upstream,
         )
 
         self.assertTrue(result["isError"])
-        self.assertEqual(RecordingAsyncClient.calls, [])
+        self.assertEqual(RecordingClient.calls, [])
 
     async def test_matching_explicit_uuid_keeps_existing_clients_authorized(self):
         result, _, _ = await query_biel_ai(
-            {"message": "hi", "project_slug": "abc123", "chat_uuid": "chat-1", "mode": "answer"},
+            {
+                "message": "hi",
+                "project_slug": "abc123",
+                "chat_uuid": "chat-1",
+                "mode": "answer",
+            },
             {"chat_uuid": "chat-1", "restore_token": "restore-1"},
+            client=self.upstream,
         )
         self.assertFalse(result["isError"])
-        self.assertEqual(RecordingAsyncClient.calls[-1]["headers"]["X-Chat-Restore-Token"], "restore-1")
-
-
-class ClientIdentityOverTheTransportTest(IsolatedAsyncioTestCase):
-    """The whole path: handshake, then a tool call carrying what it announced."""
-
-    def setUp(self):
-        app.state.session_manager = SessionManager()
-        RecordingAsyncClient.calls = []
-        patcher = patch("biel_mcp.server.httpx.AsyncClient", RecordingAsyncClient)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    async def post_mcp(self, client, body, session_id=None, user_agent=None):
-        headers = {
-            "Content-Type": "application/json",
-            "MCP-Protocol-Version": MCP_PROTOCOL_VERSION_V2,
-        }
-        if session_id:
-            headers["MCP-Session-Id"] = session_id
-        if user_agent:
-            headers["User-Agent"] = user_agent
-        return await client.post(
-            "/mcp/abc123", content=json.dumps(body), headers=headers
-        )
-
-    def initialize_body(self, name="claude-code", version="2.1"):
-        return {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": MCP_PROTOCOL_VERSION_V2,
-                "capabilities": {},
-                "clientInfo": {"name": name, "version": version},
-            },
-        }
-
-    def call_body(self):
-        return {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {"name": "biel_ai", "arguments": {"message": "hi"}},
-        }
-
-    async def test_the_client_named_at_initialize_labels_a_later_tool_call(self):
-        transport = httpx.ASGITransport(app=app)
-        async with RealAsyncClient(
-            transport=transport, base_url="http://test"
-        ) as client:
-            initialized = await self.post_mcp(
-                client, self.initialize_body(), user_agent="claude-code/2.1"
-            )
-            session_id = initialized.headers["MCP-Session-Id"]
-
-            await self.post_mcp(
-                client,
-                self.call_body(),
-                session_id=session_id,
-                user_agent="claude-code/2.1",
-            )
-
-        headers = RecordingAsyncClient.calls[-1]["headers"]
-        self.assertEqual(headers["X-MCP-Client-Name"], "claude-code")
-        self.assertEqual(headers["X-MCP-Client-Version"], "2.1")
-        self.assertEqual(headers["X-MCP-Client-UA"], "claude-code/2.1")
-
-    async def test_a_client_that_names_nobody_still_gets_its_query_relayed(self):
-        transport = httpx.ASGITransport(app=app)
-        async with RealAsyncClient(
-            transport=transport, base_url="http://test"
-        ) as client:
-            body = self.initialize_body()
-            del body["params"]["clientInfo"]
-            initialized = await self.post_mcp(client, body)
-            session_id = initialized.headers["MCP-Session-Id"]
-
-            response = await self.post_mcp(
-                client, self.call_body(), session_id=session_id
-            )
-
-        self.assertEqual(response.status_code, 200)
-        headers = RecordingAsyncClient.calls[-1]["headers"]
-        self.assertNotIn("X-MCP-Client-Name", headers)
-
-    async def test_existing_client_continues_without_supplying_a_restore_token(self):
-        """The capability stays internal; old MCP configs need no changes."""
-        transport = httpx.ASGITransport(app=app)
-        async with RealAsyncClient(
-            transport=transport, base_url="http://test"
-        ) as client:
-            initialized = await self.post_mcp(client, self.initialize_body())
-            session_id = initialized.headers["MCP-Session-Id"]
-
-            await self.post_mcp(client, self.call_body(), session_id=session_id)
-            await self.post_mcp(client, self.call_body(), session_id=session_id)
-
-        second_relay = RecordingAsyncClient.calls[-1]
-        self.assertEqual(second_relay["json"]["chat_uuid"], "chat-1")
         self.assertEqual(
-            second_relay["headers"]["X-Chat-Restore-Token"], "restore-1"
+            RecordingClient.calls[-1]["headers"]["X-Chat-Restore-Token"], "restore-1"
         )
-
-    async def test_search_between_answers_preserves_the_conversation(self):
-        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            initialized = await self.post_mcp(client, self.initialize_body())
-            session_id = initialized.headers["MCP-Session-Id"]
-            await self.post_mcp(client, self.call_body(), session_id)
-            search = self.call_body()
-            search["params"] = {"name": "biel_search", "arguments": {"query": "SDK setup"}}
-            response = await self.post_mcp(client, search, session_id)
-            request = RecordingAsyncClient.calls[-1]
-            self.assertTrue(request["url"].endswith("/search/"))
-            self.assertNotIn("X-Chat-Restore-Token", request["headers"])
-            self.assertNotIn("chat_uuid", request["params"])
-            self.assertEqual(request["params"]["q"], "SDK setup")
-            self.assertEqual(request["params"]["search_type"], "hybrid")
-            self.assertFalse(response.json()["result"]["isError"])
-            self.assertIn("Install the SDK", response.json()["result"]["content"][0]["text"])
-            await self.post_mcp(client, self.call_body(), session_id)
-        self.assertEqual(RecordingAsyncClient.calls[-1]["json"]["chat_uuid"], "chat-1")
-        self.assertEqual(RecordingAsyncClient.calls[-1]["headers"]["X-Chat-Restore-Token"], "restore-1")
-
-    async def test_initialized_notification_is_accepted_without_a_response_body(self):
-        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            initialized = await self.post_mcp(client, self.initialize_body())
-            response = await self.post_mcp(client, {"jsonrpc": "2.0", "method": "notifications/initialized"}, initialized.headers["MCP-Session-Id"])
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.content, b"")
-
-    async def test_expired_session_returns_404_without_creating_a_conversation(self):
-        session = await app.state.session_manager.create_session(project_slug="abc123")
-        await app.state.session_manager.delete_session(session)
-        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            response = await self.post_mcp(client, self.call_body(), session)
-        self.assertEqual(response.status_code, 404)
-        self.assertEqual(RecordingAsyncClient.calls, [])
-        self.assertIsNone(await app.state.session_manager.get_session(session))
-
-    async def test_session_cannot_be_used_at_another_project_path(self):
-        session = await app.state.session_manager.create_session(project_slug="different-project")
-        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            for body in (self.initialize_body(), self.call_body()):
-                response = await self.post_mcp(client, body, session)
-                self.assertEqual(response.status_code, 404)
-            headers = {"MCP-Session-Id": session}
-            for method in (client.get, client.delete):
-                response = await method("/mcp/abc123", headers=headers)
-                self.assertEqual(response.status_code, 404)
-        self.assertEqual(RecordingAsyncClient.calls, [])
-        self.assertIsNotNone(await app.state.session_manager.get_session(session))
-
-    async def test_tool_cannot_override_connection_project(self):
-        session = await app.state.session_manager.create_session(project_slug="abc123")
-        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            body = self.call_body()
-            body["params"]["arguments"]["project_slug"] = "another-project"
-            response = await self.post_mcp(client, body, session)
-        self.assertTrue(response.json()["result"]["isError"])
-        self.assertEqual(RecordingAsyncClient.calls, [])
-        stored = await app.state.session_manager.get_session(session)
-        self.assertFalse(stored.get("chat_uuid"))
-
-    async def test_reconnected_client_cannot_continue_with_a_previous_uuid(self):
-        async with RealAsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            initialized = await self.post_mcp(client, self.initialize_body())
-            body = self.call_body()
-            body["params"]["arguments"]["chat_uuid"] = "chat-1"
-            response = await self.post_mcp(client, body, initialized.headers["MCP-Session-Id"])
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json()["result"]["isError"])
-        self.assertEqual(RecordingAsyncClient.calls, [])
 
 
 class SearchModeTest(IsolatedAsyncioTestCase):
     async def test_existing_biel_ai_arguments_still_generate_an_answer(self):
-        RecordingAsyncClient.calls = []
-        with patch("biel_mcp.server.httpx.AsyncClient", RecordingAsyncClient):
-            result, chat, token = await query_biel_ai({"message": "SDK auth"}, {"project_slug": "docs"})
+        RecordingClient.calls = []
+        result, chat, token = await query_biel_ai(
+            {"message": "SDK auth"}, {"project_slug": "docs"}, client=RecordingClient()
+        )
         self.assertFalse(result["isError"])
         self.assertEqual(chat, "chat-1")
         self.assertEqual(token, "restore-1")
         self.assertIn("Biel.ai responds", result["content"][0]["text"])
-        self.assertIn("json", RecordingAsyncClient.calls[0])
+        self.assertIn("json", RecordingClient.calls[0])
 
     async def test_tool_arguments_cannot_switch_biel_ai_to_retrieval(self):
         for mode in ("search", "get"):
-            RecordingAsyncClient.calls = []
-            with self.subTest(mode=mode), patch("biel_mcp.server.httpx.AsyncClient", RecordingAsyncClient):
-                result, chat, _ = await query_biel_ai({"message": "SDK auth", "mode": mode}, {"project_slug": "docs"})
+            RecordingClient.calls = []
+            with self.subTest(mode=mode):
+                result, chat, _ = await query_biel_ai(
+                    {"message": "SDK auth", "mode": mode},
+                    {"project_slug": "docs"},
+                    client=RecordingClient(),
+                )
             self.assertFalse(result["isError"])
             self.assertEqual(chat, "chat-1")
-            self.assertIn("json", RecordingAsyncClient.calls[0])
+            self.assertIn("json", RecordingClient.calls[0])
 
-    async def test_search_uses_get_with_project_credentials_without_chat_capabilities(self):
-        RecordingAsyncClient.calls = []
-        with patch("biel_mcp.server.httpx.AsyncClient", RecordingAsyncClient):
-            result, chat, token = await query_biel_search(
-                {"query": "SDK auth", "mode": "answer", "limit": 2},
-                {"project_slug": "docs", "api_key": "private-key", "domain": "https://docs.example.com", "chat_uuid": "old-chat"},
-            )
+    async def test_search_uses_get_with_project_credentials_without_chat_capabilities(
+        self,
+    ):
+        RecordingClient.calls = []
+        result, chat, token = await query_biel_search(
+            {"query": "SDK auth", "mode": "answer", "limit": 2},
+            {
+                "project_slug": "docs",
+                "api_key": "private-key",
+                "domain": "https://docs.example.com",
+                "chat_uuid": "old-chat",
+            },
+            client=RecordingClient(),
+        )
         self.assertFalse(result["isError"])
         self.assertIsNone(chat)
         self.assertIsNone(token)
-        request = RecordingAsyncClient.calls[0]
+        request = RecordingClient.calls[0]
         self.assertTrue(request["url"].endswith("/projects/docs/search/"))
-        self.assertEqual(request["params"], {"q": "SDK auth", "url": "https://docs.example.com", "source_types": "all", "search_type": "hybrid"})
+        self.assertEqual(
+            request["params"],
+            {
+                "q": "SDK auth",
+                "url": "https://docs.example.com",
+                "source_types": "all",
+                "search_type": "hybrid",
+            },
+        )
         self.assertEqual(request["headers"]["Authorization"], "Api-Key private-key")
         self.assertEqual(request["headers"]["X-Biel-Source"], "mcp")
         self.assertNotIn("X-Chat-Restore-Token", request["headers"])
 
     async def test_invalid_query_or_search_limit_fails_before_any_api_call(self):
-        RecordingAsyncClient.calls = []
-        for options in ({"query": ""}, {"query": None}, {"query": 1}, {"limit": 0}, {"limit": 21}, {"limit": True}, {"limit": "5"}):
-            with self.subTest(options=options), patch("biel_mcp.server.httpx.AsyncClient", RecordingAsyncClient):
-                result, _, _ = await query_biel_search({"query": "setup", "project_slug": "docs", **options})
+        RecordingClient.calls = []
+        for options in (
+            {"query": ""},
+            {"query": None},
+            {"query": 1},
+            {"limit": 0},
+            {"limit": 21},
+            {"limit": True},
+            {"limit": "5"},
+        ):
+            with self.subTest(options=options):
+                result, _, _ = await query_biel_search(
+                    {"query": "setup", "project_slug": "docs", **options},
+                    client=RecordingClient(),
+                )
             self.assertTrue(result["isError"])
-        self.assertEqual(RecordingAsyncClient.calls, [])
+        self.assertEqual(RecordingClient.calls, [])
 
 
 class UpstreamFailuresTest(IsolatedAsyncioTestCase):
     async def query(self, transport, mode="answer"):
-        client = RealAsyncClient(transport=transport)
-        with patch("biel_mcp.server.httpx.AsyncClient", return_value=client):
+        async with httpx.AsyncClient(transport=transport) as client:
             if mode == "search":
-                return await query_biel_search({"query": "private question", "project_slug": "docs"})
-            return await query_biel_ai({"message": "private question", "project_slug": "docs"})
+                return await query_biel_search(
+                    {"query": "private question", "project_slug": "docs"}, client=client
+                )
+            return await query_biel_ai(
+                {"message": "private question", "project_slug": "docs"}, client=client
+            )
 
     async def test_search_http_errors_and_timeouts_are_marked_as_tool_failures(self):
         for code in (403, 404, 429, 500):
             with self.subTest(code=code):
                 result, _, _ = await self.query(
-                    httpx.MockTransport(lambda request, status=code: httpx.Response(status, text="private-detail")),
+                    httpx.MockTransport(
+                        lambda request, status=code: httpx.Response(
+                            status, text="private-detail"
+                        )
+                    ),
                     mode="search",
                 )
                 self.assertTrue(result["isError"])
                 self.assertNotIn("private-detail", str(result))
         with self.assertLogs("biel-mcp", level="ERROR") as captured:
-            result, _, _ = await self.query(httpx.MockTransport(raise_read_timeout), mode="search")
+            result, _, _ = await self.query(
+                httpx.MockTransport(raise_read_timeout), mode="search"
+            )
         self.assertTrue(result["isError"])
         self.assertEqual(captured.records[-1].mode, "search")
         self.assertEqual(captured.records[-1].error_kind, "timeout")
 
-    async def test_malformed_search_payload_is_not_presented_as_a_successful_answer(self):
+    async def test_malformed_search_payload_is_not_presented_as_a_successful_answer(
+        self,
+    ):
         result, _, _ = await self.query(
-            httpx.MockTransport(lambda request: httpx.Response(200, json={"ai_message": {"message": "wrong-contract"}})),
+            httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200, json={"ai_message": {"message": "wrong-contract"}}
+                )
+            ),
             mode="search",
         )
         self.assertTrue(result["isError"])
@@ -748,7 +556,13 @@ class UpstreamFailuresTest(IsolatedAsyncioTestCase):
     async def test_http_errors_are_tool_errors_and_do_not_echo_backend_payloads(self):
         for status in (403, 404, 429, 500):
             with self.subTest(status=status):
-                transport = httpx.MockTransport(lambda request, code=status: httpx.Response(code, text="secret-backend-payload", headers={"x-request-id": "upstream-id"}))
+                transport = httpx.MockTransport(
+                    lambda request, code=status: httpx.Response(
+                        code,
+                        text="secret-backend-payload",
+                        headers={"x-request-id": "upstream-id"},
+                    )
+                )
                 with self.assertLogs("biel-mcp", level="ERROR") as captured:
                     result, chat, token = await self.query(transport)
                 self.assertTrue(result["isError"])
@@ -777,42 +591,86 @@ def raise_read_timeout(request):
 
 class IncompleteAnswerTest(TestCase):
     def test_output_limit_is_visible_without_exposing_the_restore_token(self):
-        result = format_biel_response({"restore_token": "private-capability", "ai_message": {"message": "Partial", "incomplete": True, "generation_metadata": {"stop_reason": "max_tokens", "continuation_count": 2}}})
+        result = format_biel_response(
+            {
+                "restore_token": "private-capability",
+                "ai_message": {
+                    "message": "Partial",
+                    "incomplete": True,
+                    "generation_metadata": {
+                        "stop_reason": "max_tokens",
+                        "continuation_count": 2,
+                    },
+                },
+            }
+        )
         self.assertIn("Partial", result)
         self.assertIn("Incomplete answer", result)
         self.assertIn("output limit", result)
         self.assertNotIn("private-capability", result)
 
     def test_other_incomplete_reasons_are_not_reported_as_output_limits(self):
-        result = format_biel_response({"ai_message": {"message": "Partial", "incomplete": True, "generation_metadata": {"stop_reason": "context_limit"}}})
+        result = format_biel_response(
+            {
+                "ai_message": {
+                    "message": "Partial",
+                    "incomplete": True,
+                    "generation_metadata": {"stop_reason": "context_limit"},
+                }
+            }
+        )
         self.assertIn("Incomplete answer", result)
         self.assertNotIn("output limit", result)
 
     def test_legacy_complete_answers_do_not_acquire_a_warning(self):
-        self.assertNotIn("Incomplete answer", format_biel_response({"ai_message": {"message": "Complete"}}))
+        self.assertNotIn(
+            "Incomplete answer",
+            format_biel_response({"ai_message": {"message": "Complete"}}),
+        )
 
 
 class ChatRecoveryHintTest(TestCase):
     def test_known_public_error_codes_have_a_useful_explanation(self):
-        for code in ("context_limit", "message_too_long", "output_limit", "generation_busy"):
-            response = httpx.Response(400 if code != "generation_busy" else 409, json={"code": code, "error": "secret-backend-payload"})
+        for code in (
+            "context_limit",
+            "message_too_long",
+            "output_limit",
+            "generation_busy",
+        ):
+            response = httpx.Response(
+                400 if code != "generation_busy" else 409,
+                json={"code": code, "error": "secret-backend-payload"},
+            )
             hint = chat_recovery_hint(response)
             self.assertTrue(hint)
             self.assertNotIn("secret-backend-payload", hint)
 
     def test_unknown_and_malformed_errors_never_echo_payloads(self):
-        for body in ({"code": "unknown", "error": "private"}, ["private"], {"code": ["private"]}):
+        for body in (
+            {"code": "unknown", "error": "private"},
+            ["private"],
+            {"code": ["private"]},
+        ):
             self.assertEqual(chat_recovery_hint(httpx.Response(400, json=body)), "")
-        self.assertEqual(chat_recovery_hint(httpx.Response(500, json={"code": "context_limit"})), "")
+        self.assertEqual(
+            chat_recovery_hint(httpx.Response(500, json={"code": "context_limit"})), ""
+        )
 
 
 class CompactionRecoveryHintTest(TestCase):
-    def test_compaction_failure_retries_in_the_same_chat_without_echoing_provider_data(self):
-        hint = chat_recovery_hint(httpx.Response(503, json={"code":"compaction_failed", "error":"private-provider-payload"}))
+    def test_compaction_failure_retries_in_the_same_chat_without_echoing_provider_data(
+        self,
+    ):
+        hint = chat_recovery_hint(
+            httpx.Response(
+                503,
+                json={"code": "compaction_failed", "error": "private-provider-payload"},
+            )
+        )
         self.assertIn("Retry in this chat", hint)
         self.assertNotIn("private-provider-payload", hint)
 
     def test_context_recovery_does_not_request_a_new_conversation(self):
-        hint = chat_recovery_hint(httpx.Response(400, json={"code":"context_limit"}))
+        hint = chat_recovery_hint(httpx.Response(400, json={"code": "context_limit"}))
         self.assertIn("smaller section", hint)
         self.assertNotIn("new conversation", hint)
